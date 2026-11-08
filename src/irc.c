@@ -1,16 +1,23 @@
 /*
- * irc.c - the IRC protocol: registration, message parsing, and the
- * /commands typed by the user.
+ * irc.c - the IRC protocol: registration, message parsing, the /commands
+ * typed by the user, reconnecting, keepalive, and outgoing flood control.
  */
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <OSUtils.h>
+#include <Events.h>
 #include "MacIRC.h"
 
-#define kMaxParams   15
-#define kChunk       300     /* characters per outgoing PRIVMSG */
+#define kMaxParams     15
+#define kChunk         300     /* characters per outgoing PRIVMSG */
+#define kOutQSize      4096
+#define kBurst         5       /* lines that may be sent at once */
+#define kRefillTicks   45      /* then one line per 3/4 second */
+#define kLagInterval   (60L * 60)    /* measure lag every minute */
+#define kDeadTimeout   (60L * 120)   /* no reply for 2 minutes: reconnect */
+#define kMaxReconnect  300           /* longest wait between attempts, seconds */
 
 typedef struct IRCMsg {
     char *prefix;
@@ -28,25 +35,43 @@ static char    gLineBuf[2048];
 static long    gLineLen = 0;
 static char    gRecvBuf[4096];
 
-static void HandleClosed(OSErr err);
+/* reconnecting */
+static Boolean       gUserDisconnect = true;
+static unsigned long gReconnectAt = 0;
+static short         gReconnectDelay = 10;
+static Boolean       gFirstConnect = true;
+
+/* keepalive and lag */
+static unsigned long gLastRecv = 0;
+static unsigned long gLagSent = 0;
+static unsigned long gLastLagCheck = 0;
+static long          gLagTicks = -1;
+
+/* server features */
+static char    gChanModesA[24] = "beI", gChanModesB[24] = "k", gChanModesC[24] = "l";
+static Boolean gElistU = false;
+static Boolean gCapAwayNotify = false;
+static char    gCapWanted[64];
+static Boolean gAway = false;
+static Boolean gListActive = false;
+
+/* outgoing queue */
+static char          gOutQ[kOutQSize];
+static long          gOutLen = 0;
+static short         gTokens = kBurst;
+static unsigned long gLastRefill = 0;
+
+static void HandleClosed(OSErr err, const char *why);
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 
-const char *IRC_MyNick(void)
-{
-    return gNick;
-}
-
-Boolean IRC_IsConnected(void)
-{
-    return Net_State() != kNetIdle;
-}
-
-Boolean IRC_IsActive(void)
-{
-    return Net_State() != kNetIdle;
-}
+const char *IRC_MyNick(void)          { return gNick; }
+Boolean IRC_IsConnected(void)         { return Net_State() != kNetIdle; }
+Boolean IRC_IsActive(void)            { return Net_State() != kNetIdle || gReconnectAt != 0; }
+Boolean IRC_IsRegistered(void)        { return gRegistered && Net_State() == kNetConnected; }
+Boolean IRC_ReconnectPending(void)    { return gReconnectAt != 0; }
+Boolean IRC_IsAway(void)              { return gAway; }
 
 static IRCWin *TargetWin(void)
 {
@@ -84,17 +109,59 @@ static void Error(IRCWin *w, const char *fmt, ...)
     Win_AddLine(w ? w : Win_Server(), kLineError, NULL, buf);
 }
 
+/* Convert to UTF-8, add CR LF; returns the length. */
+static long EncodeLine(const char *line, char *buf, long max)
+{
+    long n;
+    MacToUTF8(line, buf, max - 2);
+    n = strlen(buf);
+    if (n > 510) n = 510;         /* RFC 1459 line limit */
+    buf[n++] = '\r';
+    buf[n++] = '\n';
+    return n;
+}
+
+/* Send right away, skipping the queue (PONG, QUIT). */
+static void SendNow(const char *line)
+{
+    char buf[1100];
+    long n;
+    if (Net_State() != kNetConnected) return;
+    n = EncodeLine(line, buf, sizeof(buf));
+    Net_Send(buf, n);
+}
+
+/* Queue a line; IRC_Poll sends queued lines at a pace servers accept,
+   so pasting many lines doesn't get us disconnected for flooding. */
 void IRC_SendLine(const char *line)
 {
     char buf[1100];
     long n;
     if (Net_State() != kNetConnected) return;
-    MacToUTF8(line, buf, sizeof(buf) - 2);
-    n = strlen(buf);
-    if (n > 510) n = 510;         /* RFC 1459 line limit */
-    buf[n++] = '\r';
-    buf[n++] = '\n';
-    Net_Send(buf, n);
+    n = EncodeLine(line, buf, sizeof(buf));
+    if (gOutLen + n > kOutQSize) {
+        Error(TargetWin(), "Too much to send at once; some lines were dropped.");
+        return;
+    }
+    BlockMove(buf, gOutQ + gOutLen, n);
+    gOutLen += n;
+}
+
+static void DrainQueue(void)
+{
+    unsigned long now = TickCount();
+    while (now - gLastRefill >= kRefillTicks) {
+        if (gTokens < kBurst) gTokens++;
+        gLastRefill += kRefillTicks;
+    }
+    while (gOutLen > 0 && gTokens > 0 && Net_State() == kNetConnected) {
+        char *nl = memchr(gOutQ, '\n', gOutLen);
+        long n = nl ? (nl - gOutQ) + 1 : gOutLen;
+        Net_Send(gOutQ, n);
+        BlockMove(gOutQ + n, gOutQ, gOutLen - n);
+        gOutLen -= n;
+        gTokens--;
+    }
 }
 
 static void SendRaw(const char *fmt, ...)
@@ -114,9 +181,75 @@ static Boolean IsMe(const char *nick)
 
 static Boolean RequireConnection(IRCWin *w)
 {
-    if (Net_State() == kNetConnected && gRegistered) return true;
+    if (IRC_IsRegistered()) return true;
     Error(w, "Not connected to a server. Choose Connect\xC9 from the File menu.");
     return false;
+}
+
+static Boolean IsHighlight(const char *text)
+{
+    char words[sizeof(gPrefs.highlightWords)], *p, *tok;
+    if (IRCStrStr(text, gNick)) return true;
+    StrNCopy(words, gPrefs.highlightWords, sizeof(words));
+    p = words;
+    while (*p) {
+        while (*p == ' ' || *p == ',') p++;
+        if (!*p) break;
+        tok = p;
+        while (*p && *p != ' ' && *p != ',') p++;
+        if (*p) *p++ = 0;
+        if (IRCStrStr(text, tok)) return true;
+    }
+    return false;
+}
+
+static void Mentioned(void)
+{
+    if (gPrefs.beepOnMention) SysBeep(1);
+    Notify_Attention();
+}
+
+Boolean IRC_IsIgnored(const char *nick, const char *userhost)
+{
+    char list[sizeof(gPrefs.ignoreList)], full[200], *p, *tok;
+    if (!gPrefs.ignoreList[0] || !nick[0]) return false;
+    snprintf(full, sizeof(full), "%s!%s", nick, userhost ? userhost : "");
+    StrNCopy(list, gPrefs.ignoreList, sizeof(list));
+    p = list;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        tok = p;
+        while (*p && *p != ' ') p++;
+        if (*p) *p++ = 0;
+        if (strchr(tok, '!') || strchr(tok, '@')) {
+            if (WildMatch(tok, full)) return true;
+        } else if (WildMatch(tok, nick)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void IRC_UpdateServerTitle(void)
+{
+    IRCWin *s = Win_Server();
+    char title[200];
+    if (!s) return;
+    if (Net_State() == kNetIdle) {
+        if (gReconnectAt) snprintf(title, sizeof(title), "%s (reconnecting)", gPrefs.server);
+        else snprintf(title, sizeof(title), "%s", gUserDisconnect && !gRegistered && gFirstConnect
+                                                 ? "MacIRC" : gPrefs.server);
+    } else if (!gRegistered) {
+        snprintf(title, sizeof(title), "%s (connecting)", gPrefs.server);
+    } else {
+        char lag[24] = "";
+        if (gLagTicks >= 0)
+            sprintf(lag, "  lag %ld.%lds", gLagTicks / 60, (gLagTicks % 60) / 6);
+        snprintf(title, sizeof(title), "%s \xD1 %s%s%s", gPrefs.server, gNick,
+                 gAway ? " (away)" : "", lag);
+    }
+    Win_SetTitle(s, title);
 }
 
 /* ------------------------------------------------------------------ */
@@ -126,9 +259,11 @@ void IRC_Connect(void)
 {
     IRCWin *s = Win_Server();
     OSErr err;
-    char title[160];
 
-    if (Net_State() != kNetIdle) IRC_Disconnect("Reconnecting");
+    if (Net_State() != kNetIdle) {
+        gUserDisconnect = true;
+        IRC_Disconnect(gPrefs.quitMsg);
+    }
     if (DNR_Busy()) {
         Error(s, "Still waiting for a previous name lookup to finish; try again in a moment.");
         return;
@@ -138,14 +273,21 @@ void IRC_Connect(void)
     gRegistered = false;
     gNickTries = 0;
     gLineLen = 0;
+    gOutLen = 0;
+    gTokens = kBurst;
+    gLastRefill = TickCount();
+    gReconnectAt = 0;
+    gUserDisconnect = false;
+    gAway = false;
+    gLagTicks = -1;
+    gLagSent = 0;
+    gCapAwayNotify = false;
+    gListActive = false;
 
-    sprintf(title, "%s", gPrefs.server);
-    Win_Rename(s, title);
     Info(s, "Connecting to %s port %d\xC9", gPrefs.server, gPrefs.port);
-
     err = Net_Connect(gPrefs.server, gPrefs.port);
-    if (err != noErr)
-        Error(s, "Could not connect: %s.", Net_ErrString(err));
+    if (err != noErr) HandleClosed(err, "Could not connect");
+    IRC_UpdateServerTitle();
 }
 
 static void MarkAllDisconnected(void)
@@ -161,11 +303,32 @@ static void MarkAllDisconnected(void)
     }
 }
 
+static void ScheduleReconnect(void)
+{
+    if (gUserDisconnect || !gPrefs.autoReconnect) return;
+    gReconnectAt = TickCount() + 60L * gReconnectDelay;
+    Info(Win_Server(), "Reconnecting in %d seconds\xC9 (choose Disconnect to stop)", gReconnectDelay);
+    gReconnectDelay *= 2;
+    if (gReconnectDelay > kMaxReconnect) gReconnectDelay = kMaxReconnect;
+}
+
 void IRC_Disconnect(const char *quitMsg)
 {
-    if (Net_State() == kNetIdle) return;
+    gUserDisconnect = true;
+    if (gReconnectAt) {
+        gReconnectAt = 0;
+        Info(Win_Server(), "Stopped reconnecting.");
+    }
+    gReconnectDelay = 10;
+    if (Net_State() == kNetIdle) {
+        IRC_UpdateServerTitle();
+        return;
+    }
     if (Net_State() == kNetConnected) {
-        SendRaw("QUIT :%s", quitMsg ? quitMsg : "MacIRC " kAppVersion);
+        char line[200];
+        snprintf(line, sizeof(line), "QUIT :%s", quitMsg ? quitMsg : gPrefs.quitMsg);
+        gOutLen = 0;
+        SendNow(line);
         Net_Close(true);
     } else {
         Net_Close(false);
@@ -173,17 +336,25 @@ void IRC_Disconnect(const char *quitMsg)
     gRegistered = false;
     MarkAllDisconnected();
     Error(Win_Server(), "Disconnected.");
+    IRC_UpdateServerTitle();
 }
 
-static void HandleClosed(OSErr err)
+static void HandleClosed(OSErr err, const char *why)
 {
+    Boolean wasConnected = Net_State() != kNetIdle;
     Net_Close(false);
     gRegistered = false;
-    MarkAllDisconnected();
-    if (err != noErr)
+    gOutLen = 0;
+    if (wasConnected) MarkAllDisconnected();
+    if (why)
+        Error(Win_Server(), "%s%s%s.", why, err != noErr ? ": " : "",
+              err != noErr ? Net_ErrString(err) : "");
+    else if (err != noErr)
         Error(Win_Server(), "Connection lost: %s.", Net_ErrString(err));
     else
         Error(Win_Server(), "Connection closed by server.");
+    ScheduleReconnect();
+    IRC_UpdateServerTitle();
 }
 
 static void MakeUserName(char *out)
@@ -203,33 +374,95 @@ static void Register(void)
 {
     char user[16];
     MakeUserName(user);
-    if (gPrefs.password[0])
-        SendRaw("PASS %s", gPrefs.password);
+    gCapWanted[0] = 0;
+    SendNow("CAP LS 302");
+    if (gPrefs.password[0]) {
+        char line[100];
+        snprintf(line, sizeof(line), "PASS %s", gPrefs.password);
+        SendNow(line);
+    }
     SendRaw("NICK %s", gNick);
     SendRaw("USER %s 0 * :%s", user, gPrefs.realname[0] ? gPrefs.realname : gNick);
 }
 
-static void AutoJoin(void)
+/* Add the channels in src to a comma-separated list, skipping duplicates. */
+static void AddChannels(char *list, long max, const char *src)
 {
-    char list[256], tok[kMaxName];
-    const char *p = gPrefs.channels;
-    short n = 0;
-
-    list[0] = 0;
-    while (*p) {
-        while (*p == ' ' || *p == ',') p++;
-        if (!*p) break;
-        n = 0;
-        if (!IsChannelName(p)) tok[n++] = '#';
-        while (*p && *p != ' ' && *p != ',' && n < (short)sizeof(tok) - 1)
-            tok[n++] = *p++;
+    char tok[kMaxName];
+    while (*src) {
+        short n = 0;
+        while (*src == ' ' || *src == ',') src++;
+        if (!*src) break;
+        if (!IsChannelName(src)) tok[n++] = '#';
+        while (*src && *src != ' ' && *src != ',' && n < (short)sizeof(tok) - 1)
+            tok[n++] = *src++;
+        while (*src && *src != ' ' && *src != ',') src++;
         tok[n] = 0;
-        if (strlen(list) + strlen(tok) + 2 < sizeof(list)) {
+        {
+            /* already listed? */
+            char *p = list;
+            Boolean dup = false;
+            long tl = strlen(tok);
+            while (*p) {
+                char *e = strchr(p, ',');
+                long len = e ? e - p : (long)strlen(p);
+                if (len == tl && IRCStrNCmp(p, tok, tl) == 0) { dup = true; break; }
+                if (!e) break;
+                p = e + 1;
+            }
+            if (dup) continue;
+        }
+        if ((long)(strlen(list) + strlen(tok) + 2) < max) {
             if (list[0]) strcat(list, ",");
             strcat(list, tok);
         }
     }
-    if (list[0]) SendRaw("JOIN %s", list);
+}
+
+static void JoinList(const char *list)
+{
+    /* split into JOIN lines of a safe length */
+    char line[420];
+    const char *p = list;
+    while (*p) {
+        const char *e;
+        long n = 0;
+        line[0] = 0;
+        while (*p) {
+            e = strchr(p, ',');
+            n = e ? e - p : (long)strlen(p);
+            if (strlen(line) + n + 2 > 380 && line[0]) break;
+            if (line[0]) strcat(line, ",");
+            strncat(line, p, n);
+            p = e ? e + 1 : p + n;
+        }
+        if (line[0]) SendRaw("JOIN %s", line);
+    }
+}
+
+static void AutoJoin(void)
+{
+    char list[600];
+    IRCWin *w;
+
+    list[0] = 0;
+    AddChannels(list, sizeof(list), gPrefs.channels);
+    if (gFirstConnect && gPrefs.rejoinChannels)
+        AddChannels(list, sizeof(list), gPrefs.lastChannels);
+    for (w = gWinList; w; w = w->next)
+        if (w->kind == kWinChannel && w->wantJoin)
+            AddChannels(list, sizeof(list), w->name);
+    gFirstConnect = false;
+    if (list[0]) JoinList(list);
+}
+
+void IRC_RememberChannels(void)
+{
+    IRCWin *w;
+    gPrefs.lastChannels[0] = 0;
+    for (w = gWinList; w; w = w->next)
+        if (w->kind == kWinChannel && w->wantJoin)
+            AddChannels(gPrefs.lastChannels, sizeof(gPrefs.lastChannels), w->name);
 }
 
 /* ------------------------------------------------------------------ */
@@ -275,7 +508,7 @@ static void ParseMessage(char *p, IRCMsg *m)
 
 static const char *Param(IRCMsg *m, short i)
 {
-    return (i < m->nparams && m->params[i]) ? m->params[i] : "";
+    return (i >= 0 && i < m->nparams && m->params[i]) ? m->params[i] : "";
 }
 
 static void JoinParams(IRCMsg *m, short from, char *out, long max)
@@ -308,20 +541,21 @@ static void HandleCTCP(IRCMsg *m, const char *target, char *body, Boolean isNoti
 {
     char *arg, *end;
     IRCWin *w;
+    static char empty[1];
 
     end = strchr(body, 0x01);
     if (end) *end = 0;
     arg = strchr(body, ' ');
-    if (arg) *arg++ = 0; else { static char empty[1]; empty[0] = 0; arg = empty; }
+    if (arg) *arg++ = 0; else { empty[0] = 0; arg = empty; }
 
     if (!isNotice && strcmp(body, "ACTION") == 0) {
         Boolean hl;
         StripFormatting(arg);
-        hl = !IsMe(m->nick) && IRCStrStr(arg, gNick);
+        hl = !IsMe(m->nick) && IsHighlight(arg);
         if (IsChannelName(target)) w = Win_Find(target);
         else w = QueryWin(m->nick, true);
         Win_AddLine(w ? w : Win_Server(), hl ? kLineHighlight : kLineAction, m->nick, arg);
-        if (hl || !IsChannelName(target)) Notify_Attention();
+        if (hl || !IsChannelName(target)) Mentioned();
         return;
     }
 
@@ -355,6 +589,7 @@ static void HandlePrivmsg(IRCMsg *m)
     Boolean hl, isChan = IsChannelName(target);
 
     if (!text) return;
+    if (m->userhost && IRC_IsIgnored(m->nick, m->userhost)) return;
     if (text[0] == 0x01) {
         HandleCTCP(m, target, text + 1, false);
         return;
@@ -366,9 +601,9 @@ static void HandlePrivmsg(IRCMsg *m)
     else w = QueryWin(m->nick, true);
     if (!w) w = Win_Server();
 
-    hl = !IsMe(m->nick) && (IRCStrStr(text, gNick) || !isChan);
+    hl = !IsMe(m->nick) && (IsHighlight(text) || !isChan);
     Win_AddLine(w, (isChan && hl) ? kLineHighlight : kLineMsg, m->nick, text);
-    if (hl) Notify_Attention();
+    if (hl) Mentioned();
 }
 
 static void HandleNotice(IRCMsg *m)
@@ -378,6 +613,7 @@ static void HandleNotice(IRCMsg *m)
     IRCWin *w = NULL;
 
     if (!text) return;
+    if (m->userhost && IRC_IsIgnored(m->nick, m->userhost)) return;
     if (text[0] == 0x01) {
         HandleCTCP(m, target, text + 1, true);
         return;
@@ -402,11 +638,14 @@ static void HandleJoin(IRCMsg *m)
         if (!w) w = Win_Create(kWinChannel, chan);
         if (!w) return;
         w->joined = true;
+        w->wantJoin = true;
         w->namesPending = false;
         Win_NickClear(w);
+        Win_SetTopic(w, "");
         Event(w, "You have joined %s", chan);
     } else if (w) {
         Win_NickAdd(w, m->nick);
+        /* extended-join sends the account and real name too; ignore them */
         Event(w, "%s (%s) has joined %s", m->nick, m->userhost ? m->userhost : "", chan);
     }
 }
@@ -420,7 +659,9 @@ static void HandlePart(IRCMsg *m)
 
     if (IsMe(m->nick)) {
         w->joined = false;
+        w->wantJoin = false;
         Win_NickClear(w);
+        Win_SetTopic(w, w->topic);
         Event(w, "You have left %s", chan);
     } else {
         Win_NickRemove(w, m->nick);
@@ -461,6 +702,7 @@ static void HandleNick(IRCMsg *m)
     if (me) {
         StrNCopy(gNick, newNick, sizeof(gNick));
         Event(Win_Server(), "You are now known as %s", newNick);
+        IRC_UpdateServerTitle();
     }
 }
 
@@ -474,9 +716,10 @@ static void HandleKick(IRCMsg *m)
 
     if (IsMe(victim)) {
         w->joined = false;
+        w->wantJoin = false;
         Win_NickClear(w);
         Error(w, "You have been kicked from %s by %s (%s)", chan, m->nick, reason);
-        Notify_Attention();
+        Mentioned();
     } else {
         Win_NickRemove(w, victim);
         Event(w, "%s was kicked by %s (%s)", victim, m->nick, reason);
@@ -498,33 +741,25 @@ static void HandleMode(IRCMsg *m)
     if (!w) return;
     Event(w, "%s sets mode %s", m->nick, all);
 
-    /* Track op/voice/etc. in the nick list */
+    /* Track op/voice/etc. in the nick list, using the modes the server
+       advertised in ISUPPORT (PREFIX and CHANMODES). */
     {
         const char *modes = Param(m, 1);
         short arg = 2;
         Boolean add = true;
         for (; *modes; modes++) {
-            char c = *modes, prefix = 0;
-            switch (c) {
-            case '+': add = true; continue;
-            case '-': add = false; continue;
-            case 'q': prefix = '~'; break;
-            case 'a': prefix = '&'; break;
-            case 'o': prefix = '@'; break;
-            case 'h': prefix = '%'; break;
-            case 'v': prefix = '+'; break;
-            case 'b': case 'e': case 'I': case 'k':
+            char c = *modes, prefix;
+            if (c == '+') { add = true; continue; }
+            if (c == '-') { add = false; continue; }
+            prefix = Win_PrefixForMode(c);
+            if (prefix) {
+                if (arg < m->nparams) Win_NickSetMode(w, m->params[arg], prefix, add);
                 arg++;
-                continue;
-            case 'l': case 'f': case 'j':
+            } else if (strchr(gChanModesA, c) || strchr(gChanModesB, c)) {
+                arg++;
+            } else if (strchr(gChanModesC, c)) {
                 if (add) arg++;
-                continue;
-            default:
-                continue;
             }
-            if (arg < m->nparams)
-                Win_NickSetMode(w, m->params[arg], prefix, add);
-            arg++;
         }
     }
 }
@@ -559,6 +794,82 @@ static void HandleNames(IRCMsg *m)
     }
 }
 
+static void HandleISupport(IRCMsg *m)
+{
+    short i;
+    for (i = 1; i < m->nparams - 1; i++) {
+        const char *t = m->params[i];
+        if (strncmp(t, "PREFIX=(", 8) == 0) {
+            char modes[8], chars[8];
+            const char *close = strchr(t + 8, ')');
+            long n = close ? close - (t + 8) : 0;
+            if (n > 0 && n < 8 && (long)strlen(close + 1) == n) {
+                memcpy(modes, t + 8, n);
+                modes[n] = 0;
+                strcpy(chars, close + 1);
+                Win_SetPrefixes(modes, chars);
+            }
+        } else if (strncmp(t, "CHANMODES=", 10) == 0) {
+            char buf[100], *a, *b, *c;
+            StrNCopy(buf, t + 10, sizeof(buf));
+            a = buf;
+            b = strchr(a, ',');
+            if (b) *b++ = 0;
+            c = b ? strchr(b, ',') : NULL;
+            if (c) *c++ = 0;
+            if (c) {
+                char *d = strchr(c, ',');
+                if (d) *d = 0;
+            }
+            StrNCopy(gChanModesA, a, sizeof(gChanModesA));
+            StrNCopy(gChanModesB, b ? b : "", sizeof(gChanModesB));
+            StrNCopy(gChanModesC, c ? c : "", sizeof(gChanModesC));
+        } else if (strncmp(t, "ELIST=", 6) == 0) {
+            gElistU = strchr(t + 6, 'U') != NULL || strchr(t + 6, 'u') != NULL;
+        }
+    }
+}
+
+static void HandleCap(IRCMsg *m)
+{
+    const char *sub = Param(m, 1);
+    if (strcmp(sub, "LS") == 0) {
+        /* CAP * LS [*] :caps */
+        Boolean more = m->nparams >= 4 && strcmp(Param(m, 2), "*") == 0;
+        const char *caps = Param(m, m->nparams - 1);
+        static const char *wanted[] = { "multi-prefix", "away-notify", NULL };
+        short i;
+        for (i = 0; wanted[i]; i++) {
+            const char *p = caps;
+            long n = strlen(wanted[i]);
+            while ((p = strstr(p, wanted[i])) != NULL) {
+                if ((p == caps || p[-1] == ' ') && (p[n] == 0 || p[n] == ' ' || p[n] == '=')) {
+                    if (strlen(gCapWanted) + n + 2 < sizeof(gCapWanted)) {
+                        if (gCapWanted[0]) strcat(gCapWanted, " ");
+                        strcat(gCapWanted, wanted[i]);
+                    }
+                    break;
+                }
+                p += n;
+            }
+        }
+        if (!more) {
+            if (gCapWanted[0]) {
+                char line[96];
+                snprintf(line, sizeof(line), "CAP REQ :%s", gCapWanted);
+                SendNow(line);
+            } else {
+                SendNow("CAP END");
+            }
+        }
+    } else if (strcmp(sub, "ACK") == 0) {
+        if (strstr(Param(m, m->nparams - 1), "away-notify")) gCapAwayNotify = true;
+        SendNow("CAP END");
+    } else if (strcmp(sub, "NAK") == 0) {
+        SendNow("CAP END");
+    }
+}
+
 static void HandleNumeric(IRCMsg *m, short num)
 {
     char all[600];
@@ -567,25 +878,64 @@ static void HandleNumeric(IRCMsg *m, short num)
     switch (num) {
     case 1:
         gRegistered = true;
+        gReconnectDelay = 10;
+        gLastRecv = gLastLagCheck = TickCount();
         StrNCopy(gNick, Param(m, 0), sizeof(gNick));
         Info(Win_Server(), "%s", Param(m, 1));
+        if (gPrefs.nickservPass[0]) {
+            char line[128];
+            snprintf(line, sizeof(line), "PRIVMSG NickServ :IDENTIFY %s", gPrefs.nickservPass);
+            IRC_SendLine(line);
+            Info(Win_Server(), "Identifying with NickServ\xC9");
+        }
         AutoJoin();
+        IRC_UpdateServerTitle();
         return;
 
-    case 5:         /* ISUPPORT: not interesting to read */
+    case 5:         /* ISUPPORT */
+        HandleISupport(m);
+        return;
+
+    case 305:       /* no longer away */
+        gAway = false;
+        Info(TargetWin(), "You are no longer marked as away.");
+        IRC_UpdateServerTitle();
+        return;
+
+    case 306:       /* now away */
+        gAway = true;
+        Info(TargetWin(), "You are marked as away.");
+        IRC_UpdateServerTitle();
+        return;
+
+    case 321:       /* LIST start */
+        if (!gListActive) ChanList_Begin(0);
+        gListActive = true;
+        return;
+
+    case 322:       /* LIST entry */
+        if (!gListActive) { ChanList_Begin(0); gListActive = true; }
+        ChanList_Add(Param(m, 1), atol(Param(m, 2)), Param(m, 3));
+        return;
+
+    case 323:       /* LIST end */
+        ChanList_End();
+        gListActive = false;
         return;
 
     case 331:       /* no topic */
         w = Win_Find(Param(m, 1));
+        if (w) Win_SetTopic(w, "");
         Info(w, "No topic is set for %s", Param(m, 1));
         return;
 
     case 332:       /* topic */
         w = Win_Find(Param(m, 1));
         if (w) {
-            char topic[512];
+            char topic[kMaxTopic];
             StrNCopy(topic, Param(m, 2), sizeof(topic));
             StripFormatting(topic);
+            Win_SetTopic(w, topic);
             Info(w, "Topic for %s: %s", Param(m, 1), topic);
         }
         return;
@@ -601,6 +951,22 @@ static void HandleNumeric(IRCMsg *m, short num)
         }
         return;
 
+    case 352:       /* WHO reply */
+        w = Win_Find(Param(m, 1));
+        if (w && w->whoPending) {
+            Win_NickSetAway(w, Param(m, 5), Param(m, 6)[0] == 'G');
+            return;
+        }
+        break;
+
+    case 315:       /* end of WHO */
+        w = Win_Find(Param(m, 1));
+        if (w && w->whoPending) {
+            w->whoPending = false;
+            return;
+        }
+        break;
+
     case 353:
         HandleNames(m);
         return;
@@ -608,8 +974,14 @@ static void HandleNumeric(IRCMsg *m, short num)
     case 366:       /* end of names */
         w = Win_Find(Param(m, 1));
         if (w && w->kind == kWinChannel) {
-            if (w->namesPending)
+            if (w->namesPending) {
                 Info(w, "%d %s on %s", w->nNicks, w->nNicks == 1 ? "user" : "users", Param(m, 1));
+                /* ask who is away, unless the channel is huge */
+                if (w->joined && w->nNicks <= 500 && !w->whoPending) {
+                    w->whoPending = true;
+                    SendRaw("WHO %s", w->name);
+                }
+            }
             w->namesPending = false;
         }
         return;
@@ -637,6 +1009,10 @@ static void HandleNumeric(IRCMsg *m, short num)
             Error(TargetWin(), "%s: %s", Param(m, 1), Param(m, 2));
         }
         return;
+
+    case 421:       /* unknown command: quietly ignore CAP on old servers */
+        if (strcmp(Param(m, 1), "CAP") == 0) return;
+        break;
     }
 
     JoinParams(m, 1, all, sizeof(all));
@@ -645,7 +1021,7 @@ static void HandleNumeric(IRCMsg *m, short num)
         Error(TargetWin(), "%s", all);
     } else if ((num >= 301 && num <= 320) || num == 330 || num == 338 ||
                num == 378 || num == 671 || num == 276) {
-        Info(TargetWin(), "%s", all);   /* WHOIS / WHOWAS replies */
+        Info(TargetWin(), "%s", all);   /* WHOIS / WHOWAS / WHO replies */
     } else {
         Info(Win_Server(), "%s", all);
     }
@@ -665,7 +1041,16 @@ static void HandleLine(const char *raw)
     if (cmd[0] >= '0' && cmd[0] <= '9') {
         HandleNumeric(&m, (short)atoi(cmd));
     } else if (strcmp(cmd, "PING") == 0) {
-        SendRaw("PONG :%s", Param(&m, 0));
+        char pong[300];
+        snprintf(pong, sizeof(pong), "PONG :%s", Param(&m, 0));
+        SendNow(pong);
+    } else if (strcmp(cmd, "PONG") == 0) {
+        const char *tok = Param(&m, m.nparams - 1);
+        if (strncmp(tok, "LAG", 3) == 0 && gLagSent) {
+            gLagTicks = TickCount() - gLagSent;
+            gLagSent = 0;
+            IRC_UpdateServerTitle();
+        }
     } else if (strcmp(cmd, "PRIVMSG") == 0) {
         HandlePrivmsg(&m);
     } else if (strcmp(cmd, "NOTICE") == 0) {
@@ -684,17 +1069,24 @@ static void HandleLine(const char *raw)
         HandleMode(&m);
     } else if (strcmp(cmd, "TOPIC") == 0) {
         IRCWin *w = Win_Find(Param(&m, 0));
-        char topic[512];
+        char topic[kMaxTopic];
         StrNCopy(topic, Param(&m, 1), sizeof(topic));
         StripFormatting(topic);
+        if (w) Win_SetTopic(w, topic);
         Event(w, "%s changed the topic to: %s", m.nick, topic);
+    } else if (strcmp(cmd, "AWAY") == 0) {
+        IRCWin *w;
+        Boolean away = m.nparams > 0 && Param(&m, 0)[0] != 0;
+        for (w = gWinList; w; w = w->next)
+            if (w->kind == kWinChannel) Win_NickSetAway(w, m.nick, away);
     } else if (strcmp(cmd, "INVITE") == 0) {
+        if (m.userhost && IRC_IsIgnored(m.nick, m.userhost)) return;
         Info(TargetWin(), "%s invites you to %s (type /join %s)", m.nick, Param(&m, 1), Param(&m, 1));
-        Notify_Attention();
+        Mentioned();
     } else if (strcmp(cmd, "ERROR") == 0) {
         Error(Win_Server(), "Server says: %s", Param(&m, 0));
-    } else if (strcmp(cmd, "PONG") == 0 || strcmp(cmd, "CAP") == 0) {
-        /* nothing */
+    } else if (strcmp(cmd, "CAP") == 0) {
+        HandleCap(&m);
     } else {
         char all[600];
         JoinParams(&m, 0, all, sizeof(all));
@@ -719,28 +1111,52 @@ static void ProcessBytes(const char *data, long n)
     }
 }
 
+static void Keepalive(void)
+{
+    unsigned long now = TickCount();
+    if (!gRegistered) return;
+    if (gLagSent && now - gLagSent > kDeadTimeout && now - gLastRecv > kDeadTimeout) {
+        HandleClosed(noErr, "No reply from the server for 2 minutes");
+        return;
+    }
+    if (!gLagSent && now - gLastLagCheck > kLagInterval) {
+        char line[40];
+        gLagSent = now;
+        gLastLagCheck = now;
+        sprintf(line, "PING :LAG%lu", now);
+        SendNow(line);
+    }
+}
+
 void IRC_Poll(void)
 {
     OSErr err;
-    short ev = Net_Poll(&err);
+    short ev;
     IRCWin *s = Win_Server();
 
+    if (gReconnectAt && TickCount() >= gReconnectAt) {
+        gReconnectAt = 0;
+        IRC_Connect();
+    }
+
+    ev = Net_Poll(&err);
     switch (ev) {
     case kNetEvtResolved: {
         char addr[20];
         Net_AddrToStr(Net_RemoteAddr(), addr);
-        Info(s, "Found %s, connecting\xC9", addr);
+        Info(s, "Found %s at %s, connecting\xC9", gPrefs.server, addr);
         break;
     }
     case kNetEvtConnected:
         Info(s, "Connected. Logging in as %s\xC9", gNick);
+        gLastRecv = TickCount();
         Register();
         break;
     case kNetEvtFailed:
-        Error(s, "Connection failed: %s.", Net_ErrString(err));
-        break;
+        HandleClosed(err, "Connection failed");
+        return;
     case kNetEvtClosed:
-        HandleClosed(err);
+        HandleClosed(err, NULL);
         return;
     }
 
@@ -749,12 +1165,15 @@ void IRC_Poll(void)
         short loops = 0;
         while (loops++ < 4 && (n = Net_Read(gRecvBuf, sizeof(gRecvBuf))) != 0) {
             if (n < 0) {
-                HandleClosed(noErr);
+                HandleClosed(noErr, NULL);
                 return;
             }
+            gLastRecv = TickCount();
             ProcessBytes(gRecvBuf, n);
             if (Net_State() != kNetConnected) return;
         }
+        DrainQueue();
+        Keepalive();
     }
 }
 
@@ -795,6 +1214,7 @@ void IRC_PartWindow(IRCWin *w, const char *reason)
 {
     if (w->kind == kWinChannel && w->joined && Net_State() == kNetConnected)
         SendRaw("PART %s :%s", w->name, reason ? reason : "Leaving");
+    w->wantJoin = false;
 }
 
 /* Split off the first word of s; returns the rest (never NULL). */
@@ -817,17 +1237,57 @@ static void ShowHelp(IRCWin *w)
         "  /me action               /notice target text",
         "  /nick newnick            /topic [new topic]",
         "  /whois nick              /names [#channel]",
-        "  /away [message]          /invite nick [#channel]",
+        "  /away [message]          /back",
+        "  /list [min users]        /invite nick [#channel]",
+        "  /ignore [mask]           /unignore mask",
         "  /kick nick [reason]      /mode target modes",
+        "  /op /deop /voice /devoice nick",
         "  /ctcp nick command       /quote raw IRC line",
         "  /server host [port]      /quit [message]",
         "  /clear                   /close",
         "Tab completes nicknames. Up/down arrows recall previous lines.",
+        "Command-click a link to open it. Click the topic bar to change the topic.",
         NULL
     };
     short i;
     for (i = 0; lines[i]; i++)
         Win_AddLine(w, kLineInfo, NULL, lines[i]);
+}
+
+static void IgnoreCommand(IRCWin *w, char *rest, Boolean add)
+{
+    char *mask;
+    NextWord(rest, &mask);
+    if (!*mask) {
+        if (add) Info(w, "Ignoring: %s", gPrefs.ignoreList[0] ? gPrefs.ignoreList : "nobody");
+        else Error(w, "Usage: /unignore nick or nick!user@host");
+        return;
+    }
+    if (add) {
+        if (strlen(gPrefs.ignoreList) + strlen(mask) + 2 >= sizeof(gPrefs.ignoreList)) {
+            Error(w, "The ignore list is full.");
+            return;
+        }
+        if (gPrefs.ignoreList[0]) strcat(gPrefs.ignoreList, " ");
+        strcat(gPrefs.ignoreList, mask);
+        Info(w, "Now ignoring %s", mask);
+    } else {
+        char list[sizeof(gPrefs.ignoreList)], *p, *tok;
+        Boolean found = false;
+        StrNCopy(list, gPrefs.ignoreList, sizeof(list));
+        gPrefs.ignoreList[0] = 0;
+        p = list;
+        while (*p) {
+            p = NextWord(p, &tok);
+            if (!*tok) break;
+            if (IRCStrCmp(tok, mask) == 0) { found = true; continue; }
+            if (gPrefs.ignoreList[0]) strcat(gPrefs.ignoreList, " ");
+            strcat(gPrefs.ignoreList, tok);
+        }
+        if (found) Info(w, "No longer ignoring %s", mask);
+        else Error(w, "%s is not on the ignore list.", mask);
+    }
+    Prefs_Save();
 }
 
 static void DoCommand(IRCWin *w, char *line)
@@ -844,6 +1304,8 @@ static void DoCommand(IRCWin *w, char *line)
     /* Commands that work without a connection */
     if (strcmp(lc, "help") == 0) { ShowHelp(w); return; }
     if (strcmp(lc, "clear") == 0) { Win_Clear(w); return; }
+    if (strcmp(lc, "ignore") == 0) { IgnoreCommand(w, rest, true); return; }
+    if (strcmp(lc, "unignore") == 0) { IgnoreCommand(w, rest, false); return; }
     if (strcmp(lc, "server") == 0 || strcmp(lc, "connect") == 0) {
         char *port;
         rest = NextWord(rest, &arg);
@@ -940,7 +1402,18 @@ static void DoCommand(IRCWin *w, char *line)
         SendRaw("WHOIS %s", arg);
     } else if (strcmp(lc, "away") == 0) {
         if (*rest) SendRaw("AWAY :%s", rest);
-        else SendRaw("AWAY");
+        else if (gAway) SendRaw("AWAY");
+        else SendRaw("AWAY :%s", gPrefs.awayMsg[0] ? gPrefs.awayMsg : "Away");
+    } else if (strcmp(lc, "back") == 0) {
+        SendRaw("AWAY");
+    } else if (strcmp(lc, "list") == 0) {
+        long min;
+        NextWord(rest, &arg);
+        min = atol(arg);
+        ChanList_Begin(min);
+        gListActive = true;
+        if (min > 1 && gElistU) SendRaw("LIST >%ld", min - 1);
+        else SendRaw("LIST");
     } else if (strcmp(lc, "invite") == 0) {
         char *chan;
         rest = NextWord(rest, &arg);
@@ -970,7 +1443,7 @@ static void DoCommand(IRCWin *w, char *line)
         if (w->kind != kWinChannel || !*arg) { Error(w, "Usage (in a channel): /%s nick", lc); return; }
         SendRaw("MODE %s %s %s", w->name, mode, arg);
     } else {
-        /* Unknown: pass through to the server, e.g. /mode, /list, /motd */
+        /* Unknown: pass through to the server, e.g. /mode, /motd */
         for (i = 0; cmd[i]; i++)
             if (cmd[i] >= 'a' && cmd[i] <= 'z') cmd[i] -= 32;
         if (*rest) SendRaw("%s %s", cmd, rest);

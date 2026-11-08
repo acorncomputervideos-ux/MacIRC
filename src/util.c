@@ -5,6 +5,7 @@
 #include <OSUtils.h>
 #include <Gestalt.h>
 #include <Traps.h>
+#include <Memory.h>
 #include "MacIRC.h"
 
 void CToPStr(const char *c, Str255 p)
@@ -103,4 +104,51 @@ OSErr SafeGestalt(OSType selector, LONGINT *response)
     *response = 0;
     if (!TrapAvailable(0xA1AD)) return -5551;   /* gestaltUndefSelectorErr */
     return Gestalt(selector, response);
+}
+
+/* Case-insensitive wildcard match supporting * and ?, used for ignore masks. */
+Boolean WildMatch(const char *p, const char *s)
+{
+    const char *star = NULL, *mark = NULL;
+    while (*s) {
+        if (*p == '*') {
+            star = p++;
+            mark = s;
+        } else if (*p == '?' || (*p && IRCToLower(*p) == IRCToLower(*s))) {
+            p++;
+            s++;
+        } else if (star) {
+            p = star + 1;
+            s = ++mark;
+        } else {
+            return false;
+        }
+    }
+    while (*p == '*') p++;
+    return *p == 0;
+}
+
+/*
+ * The List Manager draws cells with an 'LDEF' code resource. To draw with a
+ * function in this application instead, give the list a small handle that
+ * holds a JMP to that function. The instruction cache must be flushed after
+ * writing code to memory (on 68020 and later).
+ */
+Handle MakeLDEFStub(ProcPtr proc)
+{
+    Handle h = NewHandle(6);
+    unsigned short *p;
+    if (!h) return NULL;
+    HLock(h);
+    p = (unsigned short *)*h;
+    p[0] = 0x4EF9;                              /* JMP absolute.L */
+    p[1] = (unsigned short)((unsigned long)proc >> 16);
+    p[2] = (unsigned short)((unsigned long)proc & 0xFFFF);
+    if (TrapAvailable(0xA198)) {                /* _HWPriv */
+#ifdef __m68k__
+        __asm__ volatile ("moveq #1,%%d0\n\t.short 0xA198"   /* FlushInstructionCache */
+                          ::: "d0", "d1", "d2", "a0", "a1", "memory", "cc");
+#endif
+    }
+    return h;
 }

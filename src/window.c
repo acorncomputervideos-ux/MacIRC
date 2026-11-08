@@ -1,6 +1,6 @@
 /*
- * window.c - IRC windows: scrollback (styled TextEdit), input line,
- * scroll bar, and a channel nick list (List Manager).
+ * window.c - IRC windows: topic bar, scrollback (styled TextEdit), input
+ * line, scroll bar, and a channel nick list (List Manager).
  */
 #include <string.h>
 #include <stdio.h>
@@ -11,20 +11,24 @@
 #include <OSUtils.h>
 #include <ToolUtils.h>
 #include <Resources.h>
+#include <Gestalt.h>
+#include <Drag.h>
 #include "MacIRC.h"
 
 #define kZoomDocProc  8
 #define kListW        112
 #define kTrimAt       28000L
 #define kTrimChunk    8000L
-#define kFontSize     9
 
 IRCWin  *gWinList = NULL;
 
 static short         gLineH = 11, gAscent = 9;
-static Boolean       gMetricsDone = false;
 static StScrpHandle  gStyleScrap = NULL;
 static short         gWinCount = 0;
+static char          gPrefixChars[8] = "~&@%+";
+static char          gPrefixModes[8] = "qaohv";
+static short         gHasDrag = -1;
+static Boolean       gDragHilite = false;
 
 static char  gHistory[kHistoryMax][kInputMax + 1];
 static short gHistCount = 0;
@@ -39,6 +43,9 @@ static const RGBColor kBlue   = { 0x0000, 0x0000, 0xD4D4 };
 static const RGBColor kRed    = { 0xDDDD, 0x0808, 0x0606 };
 static const RGBColor kPurple = { 0x4646, 0x0000, 0xA5A5 };
 static const RGBColor kBrown  = { 0x5656, 0x2C2C, 0x0505 };
+
+static void SetupDrag(IRCWin *w);
+static void RemoveDrag(IRCWin *w);
 
 /* ------------------------------------------------------------------ */
 /* Lookup                                                              */
@@ -81,10 +88,17 @@ static Boolean Win_IsValid(IRCWin *target)
     return false;
 }
 
+void Win_GetLineMetrics(short *lineH, short *ascent)
+{
+    *lineH = gLineH;
+    *ascent = gAscent;
+}
+
 /* ------------------------------------------------------------------ */
 /* Layout                                                              */
 
 typedef struct WinLayout {
+    Rect  topic;    /* topic bar (channels), empty otherwise */
     Rect  out;      /* scrollback text area */
     Rect  sb;       /* scrollback scroll bar */
     Rect  list;     /* nick list rView (channels) */
@@ -92,21 +106,39 @@ typedef struct WinLayout {
     short divY;     /* divider between scrollback and input */
 } WinLayout;
 
+static void ComputeMetrics(void)
+{
+    FontInfo fi;
+    TextFont(gPrefs.fontID);
+    TextSize(gPrefs.fontSize);
+    GetFontInfo(&fi);
+    gLineH = fi.ascent + fi.descent + fi.leading;
+    gAscent = fi.ascent;
+    if (!gStyleScrap) gStyleScrap = (StScrpHandle)NewHandle(sizeof(StScrpRec));
+}
+
 static void ComputeLayout(IRCWin *w, WinLayout *L)
 {
     Rect r = w->win->portRect;
     short inputH = 2 * gLineH + 8;
     short listLeft = r.right;
+    short top = r.top;
 
+    if (w->kind == kWinChannel) {
+        SetRect(&L->topic, r.left, r.top, r.right, r.top + gLineH + 6);
+        top = L->topic.bottom;
+    } else {
+        SetRect(&L->topic, 0, 0, 0, 0);
+    }
     L->divY = r.bottom - inputH;
     if (w->kind == kWinChannel) {
         listLeft = r.right - kListW;
-        SetRect(&L->list, listLeft + 1, r.top, r.right - 15, L->divY);
+        SetRect(&L->list, listLeft + 1, top, r.right - 15, L->divY);
     } else {
         SetRect(&L->list, 0, 0, 0, 0);
     }
-    SetRect(&L->sb, listLeft - 15, r.top - 1, listLeft + 1, L->divY + 1);
-    SetRect(&L->out, r.left + 4, r.top + 2, listLeft - 17, L->divY - 2);
+    SetRect(&L->sb, listLeft - 15, top - 1, listLeft + 1, L->divY + 1);
+    SetRect(&L->out, r.left + 4, top + 2, listLeft - 17, L->divY - 2);
     SetRect(&L->in, r.left + 4, L->divY + 4, r.right - 19, L->divY + 4 + 2 * gLineH);
 }
 
@@ -161,16 +193,89 @@ static void DrawGrowBox(IRCWin *w)
     DisposeRgn(save);
 }
 
+static void DrawTopic(IRCWin *w, WinLayout *L)
+{
+    Rect r = L->topic;
+    RgnHandle save;
+    const char *label = "Topic: ";
+
+    if (w->kind != kWinChannel) return;
+    r.bottom -= 1;
+    EraseRect(&r);
+    save = NewRgn();
+    GetClip(save);
+    r.right -= 4;
+    ClipRect(&r);
+    MoveTo(r.left + 4, r.top + 3 + gAscent);
+    TextFace(bold);
+    DrawText((Ptr)label, 0, strlen(label));
+    TextFace(normal);
+    if (w->topic[0]) {
+        DrawText(w->topic, 0, strlen(w->topic));
+    } else {
+        const char *none = w->joined ? "(none)" : "(not in channel)";
+        if (gHasColorQD) RGBForeColor((RGBColor *)&kGray);
+        DrawText((Ptr)none, 0, strlen(none));
+        ForeColor(blackColor);
+    }
+    SetClip(save);
+    DisposeRgn(save);
+    MoveTo(L->topic.left, L->topic.bottom - 1);
+    LineTo(L->topic.right, L->topic.bottom - 1);
+}
+
+/* ---- nick list drawing ---- */
+
+static short PrefixRank(char c)
+{
+    char *p = c ? strchr(gPrefixChars, c) : NULL;
+    return p ? (short)(p - gPrefixChars) : 99;
+}
+
+static pascal void NickLDEF(short msg, Boolean sel, Rect *r, Cell cell,
+                            short off, short len, ListHandle lh)
+{
+    IRCWin *w = (IRCWin *)(*lh)->refCon;
+    (void)off; (void)len;
+
+    if (msg == lHiliteMsg) {
+        InvertRect(r);
+        return;
+    }
+    if (msg != lDrawMsg) return;
+    EraseRect(r);
+    if (w && w->nicks && cell.v >= 0 && cell.v < w->nNicks) {
+        NickEntry e = (*w->nicks)[cell.v];
+        char buf[kMaxNick + 2];
+        short n = 0;
+        if (e.modes[0]) buf[n++] = e.modes[0];
+        StrNCopy(buf + n, e.nick, sizeof(buf) - n);
+        MoveTo(r->left + 3, r->top + gAscent);
+        if (e.away) {
+            if (gHasColorQD) RGBForeColor((RGBColor *)&kGray);
+            else TextFace(italic);
+        }
+        DrawText(buf, 0, strlen(buf));
+        ForeColor(blackColor);
+        TextFace(normal);
+    }
+    if (sel) InvertRect(r);
+}
+
 static void CreateList(IRCWin *w, const Rect *rView)
 {
     Rect bounds;
     Point cSize;
+    Handle stub;
     SetRect(&bounds, 0, 0, 1, 0);
     cSize.h = 0;
     cSize.v = 0;
     w->list = LNew(rView, &bounds, cSize, 0, w->win, true, false, false, true);
     if (w->list) {
         (*w->list)->selFlags = lOnlyOne;
+        (*w->list)->refCon = (long)w;
+        stub = MakeLDEFStub((ProcPtr)NickLDEF);
+        if (stub) (*w->list)->listDefProc = stub;
         w->listDirty = true;
     }
 }
@@ -215,27 +320,6 @@ static void Relayout(IRCWin *w)
 
 /* ------------------------------------------------------------------ */
 /* Creation / disposal                                                 */
-
-static Boolean HasColorQD(void)
-{
-    static short known = -1;
-    if (known < 0) {
-        SysEnvRec env;
-        known = (SysEnvirons(1, &env) == noErr && env.hasColorQD) ? 1 : 0;
-    }
-    return known == 1;
-}
-
-static void InitMetrics(void)
-{
-    FontInfo fi;
-    if (gMetricsDone) return;
-    GetFontInfo(&fi);
-    gLineH = fi.ascent + fi.descent + fi.leading;
-    gAscent = fi.ascent;
-    gStyleScrap = (StScrpHandle)NewHandle(sizeof(StScrpRec));
-    gMetricsDone = true;
-}
 
 static void DefaultBounds(IRCWin *w, Rect *b)
 {
@@ -282,7 +366,7 @@ IRCWin *Win_Create(short kind, const char *name)
     CToPStr(name, title);
     /* A colour port is needed for styled text colours: on an old-style
        port, RGBForeColor snaps to the 8 basic QuickDraw colours. */
-    if (HasColorQD())
+    if (gHasColorQD)
         w->win = NewCWindow(NULL, &bounds, title, false, kZoomDocProc,
                             (WindowPtr)-1L, kind != kWinServer, (long)w);
     else
@@ -295,9 +379,7 @@ IRCWin *Win_Create(short kind, const char *name)
 
     GetPort(&save);
     SetPort(w->win);
-    TextFont(kFontIDMonaco);
-    TextSize(kFontSize);
-    InitMetrics();
+    ComputeMetrics();
     ComputeLayout(w, &L);
 
     w->out = TEStyleNew(&L.out, &L.out);
@@ -315,6 +397,8 @@ IRCWin *Win_Create(short kind, const char *name)
     *link = w;
     gWinCount++;
 
+    SetupDrag(w);
+    Log_Open(w);
     ShowWindow(w->win);
     SelectWindow(w->win);
     SetPort(save);
@@ -344,6 +428,8 @@ void Win_Dispose(IRCWin *w)
         SetRect(&gPrefs.winBounds, tl.h, tl.v, br.h, br.v);
         SetPort(save);
     }
+    Log_Close(w);
+    RemoveDrag(w);
     TEDispose(w->out);
     TEDispose(w->in);
     if (w->list) LDispose(w->list);
@@ -367,6 +453,28 @@ void Win_Rename(IRCWin *w, const char *name)
     Win_RebuildMenu();
 }
 
+void Win_SetTitle(IRCWin *w, const char *title)
+{
+    Str255 t, cur;
+    CToPStr(title, t);
+    GetWTitle(w->win, cur);
+    if (cur[0] == t[0] && memcmp(cur + 1, t + 1, t[0]) == 0) return;
+    SetWTitle(w->win, t);
+}
+
+void Win_SetTopic(IRCWin *w, const char *topic)
+{
+    WinLayout L;
+    GrafPtr save;
+    if (!w || w->kind != kWinChannel) return;
+    StrNCopy(w->topic, topic, sizeof(w->topic));
+    GetPort(&save);
+    SetPort(w->win);
+    ComputeLayout(w, &L);
+    InvalRect(&L.topic);
+    SetPort(save);
+}
+
 /* ------------------------------------------------------------------ */
 /* Output                                                              */
 
@@ -379,9 +487,9 @@ static void InsertStyled(TEHandle te, const char *s, long n, short face, const R
     e->scrpStartChar = 0;
     e->scrpHeight = gLineH;
     e->scrpAscent = gAscent;
-    e->scrpFont = kFontIDMonaco;
+    e->scrpFont = gPrefs.fontID;
     e->scrpFace = (Style)face;
-    e->scrpSize = kFontSize;
+    e->scrpSize = gPrefs.fontSize;
     e->scrpColor = *color;
     TEStyleInsert((Ptr)s, n, gStyleScrap, te);
 }
@@ -411,12 +519,10 @@ void Win_AddLine(IRCWin *w, short cls, const char *who, const char *text)
     Boolean atBottom;
     short ss, se;
     long len;
-    char stamp[32];
-    unsigned long secs;
-    DateTimeRec dt;
+    char stamp[32], logLine[700];
     const RGBColor *color = &kBlack;
     short face = normal;
-    char pre[kMaxNick + 8], post[4];
+    char pre[kMaxNick + 8];
 
     if (!w) return;
     te = w->out;
@@ -431,12 +537,18 @@ void Win_AddLine(IRCWin *w, short cls, const char *who, const char *text)
     len = (*te)->teLength;
     TESetSelect(len, len, te);
 
-    GetDateTime(&secs);
-    SecondsToDate(secs, &dt);
-    sprintf(stamp, "%s[%02d:%02d] ", len > 0 ? "\r" : "", dt.hour, dt.minute);
-    InsertStyled(te, stamp, strlen(stamp), normal, &kGray);
+    stamp[0] = 0;
+    if (gPrefs.showTimestamps || w->logRef) {
+        unsigned long secs;
+        DateTimeRec dt;
+        GetDateTime(&secs);
+        SecondsToDate(secs, &dt);
+        sprintf(stamp, "[%02d:%02d] ", dt.hour, dt.minute);
+    }
+    if (len > 0) InsertStyled(te, "\r", 1, normal, &kGray);
+    if (gPrefs.showTimestamps)
+        InsertStyled(te, stamp, strlen(stamp), normal, &kGray);
 
-    pre[0] = post[0] = 0;
     switch (cls) {
     case kLineMsg:       color = &kBlack;  break;
     case kLineSelf:      color = &kBlue;   break;
@@ -448,6 +560,7 @@ void Win_AddLine(IRCWin *w, short cls, const char *who, const char *text)
     case kLineHighlight: color = &kRed;    break;
     }
 
+    pre[0] = 0;
     if (who) {
         switch (cls) {
         case kLineAction: sprintf(pre, "* %s ", who); break;
@@ -456,13 +569,19 @@ void Win_AddLine(IRCWin *w, short cls, const char *who, const char *text)
         }
         InsertStyled(te, pre, strlen(pre), bold, color);
     } else if (cls == kLineError || cls == kLineInfo || cls == kLineEvent) {
-        InsertStyled(te, "*** ", 4, normal, color);
+        strcpy(pre, "*** ");
+        InsertStyled(te, pre, 4, normal, color);
     }
     if (cls == kLineHighlight) face = bold;
     InsertStyled(te, text, strlen(text), face, color);
 
     if (ss != se) TESetSelect(ss, se, te);
     UpdateScroll(w, atBottom);
+
+    if (w->logRef) {
+        sprintf(logLine, "%s%s%.600s", stamp, pre, text);
+        Log_Write(w, logLine);
+    }
 
     /* Activity marks for the Windows menu */
     if ((w->win != FrontWindow() || gInBackground) &&
@@ -495,6 +614,34 @@ void Win_ClearActivity(IRCWin *w)
     }
 }
 
+/* Font or size changed in Preferences: restyle every window. */
+void Win_ApplyFont(void)
+{
+    IRCWin *w;
+    GrafPtr save;
+    TextStyle ts;
+
+    GetPort(&save);
+    for (w = gWinList; w; w = w->next) {
+        short ss, se;
+        SetPort(w->win);
+        ComputeMetrics();
+        ts.tsFont = gPrefs.fontID;
+        ts.tsSize = gPrefs.fontSize;
+        ss = (*w->out)->selStart;
+        se = (*w->out)->selEnd;
+        TESetSelect(0, 32767, w->out);
+        TESetStyle(doFont + doSize, &ts, false, w->out);
+        TESetSelect(ss, se, w->out);
+        (*w->in)->txFont = gPrefs.fontID;
+        (*w->in)->txSize = gPrefs.fontSize;
+        (*w->in)->lineHeight = gLineH;
+        (*w->in)->fontAscent = gAscent;
+        Relayout(w);
+    }
+    SetPort(save);
+}
+
 /* ------------------------------------------------------------------ */
 /* Events                                                              */
 
@@ -508,6 +655,7 @@ void Win_Update(IRCWin *w)
     BeginUpdate(w->win);
     ComputeLayout(w, &L);
     EraseRect(&w->win->portRect);
+    DrawTopic(w, &L);
     TEUpdate(&w->win->portRect, w->out);
     TEUpdate(&w->win->portRect, w->in);
     MoveTo(w->win->portRect.left, L.divY);
@@ -570,25 +718,205 @@ static pascal void ScrollAction(ControlHandle c, short part)
 
 static void OpenQueryFromList(IRCWin *w)
 {
-    Cell cell;
     long last = LLastClick(w->list);
-    char buf[kMaxNick + 2];
-    short len = kMaxNick;
+    short row = HiWord(last);
+    char nick[kMaxNick];
     IRCWin *q;
-    char *nick;
 
-    cell.v = HiWord(last);
-    cell.h = LoWord(last);
-    if (cell.v < 0 || cell.v >= w->nNicks) return;
-    LGetCell(buf, &len, cell, w->list);
-    if (len <= 0) return;
-    buf[len] = 0;
-    nick = buf;
-    while (*nick && strchr("~&@%+", *nick)) nick++;
-    if (!*nick) return;
+    if (row < 0 || row >= w->nNicks) return;
+    StrNCopy(nick, (*w->nicks)[row].nick, sizeof(nick));
+    if (!nick[0]) return;
     q = Win_Find(nick);
     if (q) SelectWindow(q->win);
     else Win_Create(kWinQuery, nick);
+}
+
+static void EditTopic(IRCWin *w)
+{
+    char buf[kMaxTopic], prompt[kMaxName + 32], cmd[kMaxTopic + 16];
+    if (!w->joined || !IRC_IsRegistered()) {
+        SysBeep(1);
+        return;
+    }
+    StrNCopy(buf, w->topic, 250);   /* the edit field holds a Str255 */
+    sprintf(prompt, "Topic for %s:", w->name);
+    if (DoPrompt(prompt, buf, 250)) {
+        sprintf(cmd, "/topic %s", buf);
+        IRC_Input(w, cmd);
+    }
+}
+
+/* Cmd-click on a URL in the scrollback opens it. */
+static Boolean ClickURL(IRCWin *w, Point pt)
+{
+    TEHandle te = w->out;
+    short off = TEGetOffset(pt, te);
+    long len = (*te)->teLength, s, e;
+    char url[300];
+
+    if (!URL_FindAt(*(*te)->hText, len, off, &s, &e)) return false;
+    if (e - s > (long)sizeof(url) - 1) e = s + sizeof(url) - 1;
+    BlockMove(*(*te)->hText + s, url, e - s);
+    url[e - s] = 0;
+    URL_Open(url);
+    return true;
+}
+
+/* ---- Drag Manager: drag text out of the scrollback, drop text into the
+        input line. Requires System 7.5 or the Macintosh Drag and Drop
+        extension. ---- */
+
+static Boolean HasDrag(void)
+{
+    if (gHasDrag < 0) {
+        LONGINT resp;
+        gHasDrag = (SafeGestalt('drag', &resp) == noErr && (resp & 1)) ? 1 : 0;
+    }
+    return gHasDrag == 1;
+}
+
+static Boolean DragHasText(DragRef drag)
+{
+    UInt16 n, i;
+    DragItemRef item;
+    Size size;
+    if (CountDragItems(drag, &n) != noErr) return false;
+    for (i = 1; i <= n; i++) {
+        if (GetDragItemReferenceNumber(drag, i, &item) != noErr) continue;
+        if (GetFlavorDataSize(drag, item, 'TEXT', &size) == noErr) return true;
+    }
+    return false;
+}
+
+static pascal OSErr DragTrack(DragTrackingMessage msg, WindowPtr win, void *refCon, DragRef drag)
+{
+    IRCWin *w = (IRCWin *)refCon;
+    (void)win;
+    switch (msg) {
+    case kDragTrackingEnterWindow:
+        gDragHilite = false;
+        break;
+    case kDragTrackingInWindow:
+        if (!gDragHilite && DragHasText(drag)) {
+            RgnHandle rgn = NewRgn();
+            WinLayout L;
+            GrafPtr save;
+            GetPort(&save);
+            SetPort(w->win);
+            ComputeLayout(w, &L);
+            InsetRect(&L.in, -3, -3);
+            RectRgn(rgn, &L.in);
+            ShowDragHilite(drag, rgn, true);
+            DisposeRgn(rgn);
+            SetPort(save);
+            gDragHilite = true;
+        }
+        break;
+    case kDragTrackingLeaveWindow:
+        if (gDragHilite) HideDragHilite(drag);
+        gDragHilite = false;
+        break;
+    }
+    return noErr;
+}
+
+static pascal OSErr DragReceive(WindowPtr win, void *refCon, DragRef drag)
+{
+    IRCWin *w = (IRCWin *)refCon;
+    UInt16 n, i;
+    DragItemRef item;
+    Size size, total = 0;
+    char buf[kInputMax * 2 + 1];
+    GrafPtr save;
+    long room;
+    (void)win;
+
+    if (gDragHilite) HideDragHilite(drag);
+    gDragHilite = false;
+    if (CountDragItems(drag, &n) != noErr) return dragNotAcceptedErr;
+    for (i = 1; i <= n; i++) {
+        if (GetDragItemReferenceNumber(drag, i, &item) != noErr) continue;
+        if (GetFlavorDataSize(drag, item, 'TEXT', &size) != noErr) continue;
+        if (total + size > (Size)sizeof(buf) - 1) size = sizeof(buf) - 1 - total;
+        if (size <= 0) break;
+        if (GetFlavorData(drag, item, 'TEXT', buf + total, &size, 0) == noErr)
+            total += size;
+    }
+    if (total == 0) return dragNotAcceptedErr;
+
+    GetPort(&save);
+    SetPort(w->win);
+    SetFocus(w, false);
+    room = kInputMax * 2 - ((*w->in)->teLength - ((*w->in)->selEnd - (*w->in)->selStart));
+    if (total > room) total = room > 0 ? room : 0;
+    if (total > 0) {
+        TEInsert(buf, total, w->in);
+        TESelView(w->in);
+    }
+    SetPort(save);
+    return noErr;
+}
+
+static void SetupDrag(IRCWin *w)
+{
+    if (!HasDrag()) return;
+    InstallTrackingHandler((DragTrackingHandlerUPP)DragTrack, w->win, w);
+    InstallReceiveHandler((DragReceiveHandlerUPP)DragReceive, w->win, w);
+}
+
+static void RemoveDrag(IRCWin *w)
+{
+    if (!HasDrag()) return;
+    RemoveTrackingHandler((DragTrackingHandlerUPP)DragTrack, w->win);
+    RemoveReceiveHandler((DragReceiveHandlerUPP)DragReceive, w->win);
+}
+
+static short LineOf(TEHandle te, short off)
+{
+    short i, n = (*te)->nLines;
+    for (i = 0; i < n - 1; i++)
+        if ((*te)->lineStarts[i + 1] > off) return i;
+    return n > 0 ? n - 1 : 0;
+}
+
+static void DragOutSelection(IRCWin *w, EventRecord *ev)
+{
+    TEHandle te = w->out;
+    DragRef drag;
+    RgnHandle rgn, inner;
+    Rect r;
+    Point origin;
+    short ss = (*te)->selStart, se = (*te)->selEnd;
+    short first, last;
+
+    if (NewDrag(&drag) != noErr) return;
+    HLock((*te)->hText);
+    AddDragItemFlavor(drag, 1, 'TEXT', *(*te)->hText + ss, se - ss, 0);
+    HUnlock((*te)->hText);
+
+    first = LineOf(te, ss);
+    last = LineOf(te, se > ss ? se - 1 : se);
+    r = (*te)->viewRect;
+    r.top = (*te)->destRect.top + first * gLineH;
+    r.bottom = (*te)->destRect.top + (last + 1) * gLineH;
+    if (r.top < (*te)->viewRect.top) r.top = (*te)->viewRect.top;
+    if (r.bottom > (*te)->viewRect.bottom) r.bottom = (*te)->viewRect.bottom;
+
+    rgn = NewRgn();
+    inner = NewRgn();
+    RectRgn(rgn, &r);
+    origin.h = 0;
+    origin.v = 0;
+    LocalToGlobal(&origin);
+    OffsetRgn(rgn, origin.h, origin.v);
+    CopyRgn(rgn, inner);
+    InsetRgn(inner, 1, 1);
+    DiffRgn(rgn, inner, rgn);
+
+    TrackDrag(drag, ev, rgn);
+    DisposeRgn(inner);
+    DisposeRgn(rgn);
+    DisposeDrag(drag);
 }
 
 void Win_Click(IRCWin *w, EventRecord *ev)
@@ -598,17 +926,31 @@ void Win_Click(IRCWin *w, EventRecord *ev)
     ControlHandle ctl;
     short part;
     GrafPtr save;
+    WinLayout L;
 
     GetPort(&save);
     SetPort(w->win);
     GlobalToLocal(&pt);
+    ComputeLayout(w, &L);
 
-    if (PtInRect(pt, &(*w->in)->viewRect)) {
+    if (w->kind == kWinChannel && PtInRect(pt, &L.topic)) {
+        EditTopic(w);
+    } else if (PtInRect(pt, &(*w->in)->viewRect)) {
         SetFocus(w, false);
         TEClick(pt, shift, w->in);
     } else if (PtInRect(pt, &(*w->out)->viewRect)) {
-        SetFocus(w, true);
-        TEClick(pt, shift, w->out);
+        TEHandle te = w->out;
+        if ((ev->modifiers & cmdKey) && ClickURL(w, pt)) {
+            /* opened */
+        } else if (HasDrag() && !shift && (*te)->selStart != (*te)->selEnd &&
+                   TEGetOffset(pt, te) >= (*te)->selStart &&
+                   TEGetOffset(pt, te) < (*te)->selEnd &&
+                   WaitMouseMoved(ev->where)) {
+            DragOutSelection(w, ev);
+        } else {
+            SetFocus(w, true);
+            TEClick(pt, shift, te);
+        }
     } else if (w->list) {
         Rect lr = (*w->list)->rView;
         lr.right += 15;
@@ -629,7 +971,7 @@ void Win_Click(IRCWin *w, EventRecord *ev)
             TrackControl(ctl, pt, (ControlActionUPP)ScrollAction);
         }
     }
-    SetPort(save);
+    if (Win_IsValid(w)) SetPort(save);
 }
 
 static void HistoryAdd(const char *line)
@@ -663,16 +1005,27 @@ static void Submit(IRCWin *w)
     char buf[kInputMax * 2 + 2];
     long n = (*w->in)->teLength;
     char *line, *p;
+    short lines = 0;
 
     if (n == 0) return;
     if (n > (long)sizeof(buf) - 1) n = sizeof(buf) - 1;
     BlockMove(*(*w->in)->hText, buf, n);
     buf[n] = 0;
+
+    /* Pasted or dropped text may hold several lines: confirm first */
+    for (p = buf; *p; ) {
+        char *e = strchr(p, '\r');
+        if (e != p && *p != '/') lines++;
+        if (!e) break;
+        p = e + 1;
+    }
+    if (lines > 2 && !ConfirmPaste(lines, w->kind == kWinServer ? "the server" : w->name))
+        return;
+
     TESetSelect(0, 32767, w->in);
     TEDelete(w->in);
     HistoryAdd(buf);
 
-    /* Pasted text may contain several lines: send each one */
     line = buf;
     while (line && *line) {
         p = strchr(line, '\r');
@@ -690,7 +1043,7 @@ static void CompleteNick(IRCWin *w)
     TEHandle in = w->in;
     short start, end = (*in)->selStart;
     char word[kMaxNick + 1], repl[kMaxName + 4];
-    const char *match = NULL;
+    char match[kMaxName];
     char *text;
     short i, n;
 
@@ -701,17 +1054,19 @@ static void CompleteNick(IRCWin *w)
     memcpy(word, text + start, n);
     word[n] = 0;
 
+    match[0] = 0;
     if (w->kind == kWinChannel && w->nicks) {
         for (i = 0; i < w->nNicks; i++) {
-            if (IRCStrNCmp((*w->nicks)[i].nick, word, n) == 0) {
-                match = (*w->nicks)[i].nick;
+            if (IRCStrNCmp((*w->nicks)[i].nick, word, n) == 0 &&
+                IRCStrCmp((*w->nicks)[i].nick, IRC_MyNick()) != 0) {
+                StrNCopy(match, (*w->nicks)[i].nick, sizeof(match));
                 break;
             }
         }
     } else if (w->kind == kWinQuery && IRCStrNCmp(w->name, word, n) == 0) {
-        match = w->name;
+        StrNCopy(match, w->name, sizeof(match));
     }
-    if (!match) { SysBeep(1); return; }
+    if (!match[0]) { SysBeep(1); return; }
 
     sprintf(repl, "%s%s", match, start == 0 ? ": " : " ");
     TESetSelect(start, end, in);
@@ -734,6 +1089,7 @@ void Win_Key(IRCWin *w, EventRecord *ev)
     case '\r':
     case 0x03:          /* Enter */
         Submit(w);
+        if (!Win_IsValid(w)) return;
         break;
     case '\t':
         CompleteNick(w);
@@ -795,38 +1151,106 @@ void Win_Grow(IRCWin *w, Point where)
     }
 }
 
+/* The zoomed ("standard") size fills the main screen below the menu bar,
+   whatever its size: 512x342 on a Classic up to large colour screens. */
+static void SetStdState(WindowPtr win)
+{
+    WStateData **ws = (WStateData **)((WindowPeek)win)->dataHandle;
+    Rect s = qd.screenBits.bounds;
+    if (!ws) return;
+    s.top += GetMBarHeight() + 19;
+    s.left += 2;
+    s.right -= 3;
+    s.bottom -= 3;
+    (*ws)->stdState = s;
+}
+
 void Win_Zoom(IRCWin *w, Point where, short part)
 {
     GrafPtr save;
     if (!TrackBox(w->win, where, part)) return;
     GetPort(&save);
     SetPort(w->win);
+    SetStdState(w->win);
     EraseRect(&w->win->portRect);
     ZoomWindow(w->win, part, false);
     Relayout(w);
     SetPort(save);
 }
 
+static void PlaceWindow(IRCWin *w, short left, short top, short width, short height)
+{
+    if (width < 240) width = 240;
+    if (height < 100) height = 100;
+    MoveWindow(w->win, left, top, false);
+    SizeWindow(w->win, width, height, true);
+    Relayout(w);
+}
+
+void Win_Tile(void)
+{
+    IRCWin *w;
+    short n = 0, cols, rows, i, cellW, cellH;
+    Rect scr = qd.screenBits.bounds;
+    short top = scr.top + GetMBarHeight();
+
+    for (w = gWinList; w; w = w->next) n++;
+    if (n == 0) return;
+    if (n <= 3) { cols = 1; rows = n; }
+    else { cols = 2; rows = (n + 1) / 2; }
+    if (rows > 4) { cols = 3; rows = (n + 2) / 3; }
+    cellW = (scr.right - scr.left - 2) / cols;
+    cellH = (scr.bottom - top - 2) / rows;
+    for (w = gWinList, i = 0; w; w = w->next, i++) {
+        short c = i % cols, r = i / cols;
+        PlaceWindow(w, scr.left + 2 + c * cellW, top + r * cellH + 20,
+                    cellW - 4, cellH - 22);
+    }
+}
+
+void Win_Cascade(void)
+{
+    IRCWin *w;
+    short i = 0;
+    Rect scr = qd.screenBits.bounds;
+    short top0 = scr.top + GetMBarHeight() + 20;
+
+    for (w = gWinList; w; w = w->next, i++) {
+        short left = 4 + 18 * i, top = top0 + 20 * i;
+        short width = scr.right - left - 6, height = scr.bottom - top - 6;
+        if (width > 580) width = 580;
+        if (height > 360) height = 360;
+        PlaceWindow(w, left, top, width, height);
+        SelectWindow(w->win);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Nick list                                                           */
 
-static short ModeRank(char m)
+void Win_SetPrefixes(const char *modes, const char *chars)
 {
-    switch (m) {
-    case '~': return 0;
-    case '&': return 1;
-    case '@': return 2;
-    case '%': return 3;
-    case '+': return 4;
-    }
-    return 5;
+    if (!*modes || strlen(modes) != strlen(chars) || strlen(chars) >= sizeof(gPrefixChars)) return;
+    strcpy(gPrefixModes, modes);
+    strcpy(gPrefixChars, chars);
 }
 
-static int NickOrder(char m1, const char *n1, char m2, const char *n2)
+char Win_PrefixForMode(char m)
 {
-    short r1 = ModeRank(m1), r2 = ModeRank(m2);
+    char *p = strchr(gPrefixModes, m);
+    return (p && m) ? gPrefixChars[p - gPrefixModes] : 0;
+}
+
+static Boolean IsPrefixChar(char c)
+{
+    return c && strchr(gPrefixChars, c) != NULL;
+}
+
+static int NickOrder(const NickEntry *a, const NickEntry *b)
+{
+    short r1 = PrefixRank(a->modes[0]), r2 = PrefixRank(b->modes[0]);
     if (r1 != r2) return r1 - r2;
-    return IRCStrCmp(n1, n2);
+    return IRCStrCmp(a->nick, b->nick);
 }
 
 static short FindNick(IRCWin *w, const char *nick)
@@ -838,16 +1262,17 @@ static short FindNick(IRCWin *w, const char *nick)
     return -1;
 }
 
-static void RemoveAt(IRCWin *w, short i)
+static void RemoveAt(IRCWin *w, short i, NickEntry *out)
 {
     NickEntry *p = *w->nicks;
+    if (out) *out = p[i];
     if (i < w->nNicks - 1)
         BlockMove(&p[i + 1], &p[i], (w->nNicks - i - 1) * (long)sizeof(NickEntry));
     w->nNicks--;
     w->listDirty = true;
 }
 
-static void InsertSorted(IRCWin *w, char mode, const char *nick)
+static void InsertSorted(IRCWin *w, const NickEntry *e)
 {
     long need = (w->nNicks + 1) * (long)sizeof(NickEntry);
     short i;
@@ -859,31 +1284,47 @@ static void InsertSorted(IRCWin *w, char mode, const char *nick)
     }
     p = *w->nicks;
     for (i = 0; i < w->nNicks; i++)
-        if (NickOrder(mode, nick, p[i].mode, p[i].nick) < 0) break;
+        if (NickOrder(e, &p[i]) < 0) break;
     if (i < w->nNicks)
         BlockMove(&p[i], &p[i + 1], (w->nNicks - i) * (long)sizeof(NickEntry));
-    p[i].mode = mode;
-    StrNCopy(p[i].nick, nick, sizeof(p[i].nick));
+    p[i] = *e;
     w->nNicks++;
     w->listDirty = true;
 }
 
+/* Keep a mode set ordered from highest to lowest prefix. */
+static void SortModes(char *m)
+{
+    short i, j, n = strlen(m);
+    for (i = 1; i < n; i++) {
+        char c = m[i];
+        for (j = i - 1; j >= 0 && PrefixRank(m[j]) > PrefixRank(c); j--)
+            m[j + 1] = m[j];
+        m[j + 1] = c;
+    }
+}
+
 void Win_NickAdd(IRCWin *w, const char *s)
 {
-    char mode = ' ';
-    short i;
+    NickEntry e;
+    short i, n = 0;
     if (!w || !w->nicks) return;
-    while (*s && strchr("~&@%+", *s)) {
-        if (mode == ' ') mode = *s;   /* first prefix is the highest */
+    memset(&e, 0, sizeof(e));
+    while (IsPrefixChar(*s)) {
+        if (!strchr(e.modes, *s) && n < (short)sizeof(e.modes) - 1) e.modes[n++] = *s;
         s++;
     }
     if (!*s) return;
+    SortModes(e.modes);
+    StrNCopy(e.nick, s, sizeof(e.nick));
     i = FindNick(w, s);
     if (i >= 0) {
-        if ((*w->nicks)[i].mode == mode) return;
-        RemoveAt(w, i);
+        NickEntry old;
+        if (strcmp((*w->nicks)[i].modes, e.modes) == 0) return;
+        RemoveAt(w, i, &old);
+        e.away = old.away;
     }
-    InsertSorted(w, mode, s);
+    InsertSorted(w, &e);
 }
 
 Boolean Win_NickRemove(IRCWin *w, const char *nick)
@@ -892,7 +1333,7 @@ Boolean Win_NickRemove(IRCWin *w, const char *nick)
     if (!w || !w->nicks) return false;
     i = FindNick(w, nick);
     if (i < 0) return false;
-    RemoveAt(w, i);
+    RemoveAt(w, i, NULL);
     return true;
 }
 
@@ -904,36 +1345,49 @@ Boolean Win_HasNick(IRCWin *w, const char *nick)
 Boolean Win_NickRename(IRCWin *w, const char *oldNick, const char *newNick)
 {
     short i;
-    char mode;
+    NickEntry e;
     if (!w || !w->nicks) return false;
     i = FindNick(w, oldNick);
     if (i < 0) return false;
-    mode = (*w->nicks)[i].mode;
-    RemoveAt(w, i);
-    InsertSorted(w, mode, newNick);
+    RemoveAt(w, i, &e);
+    StrNCopy(e.nick, newNick, sizeof(e.nick));
+    InsertSorted(w, &e);
     return true;
 }
 
-void Win_NickSetMode(IRCWin *w, const char *nick, char modeChar, Boolean add)
+void Win_NickSetMode(IRCWin *w, const char *nick, char prefix, Boolean add)
 {
-    short i;
-    char cur, mode;
-    if (!w || !w->nicks) return;
+    short i, n;
+    NickEntry e;
+    char *p;
+    if (!w || !w->nicks || !prefix) return;
     i = FindNick(w, nick);
     if (i < 0) return;
-    cur = (*w->nicks)[i].mode;
+    e = (*w->nicks)[i];
+    p = strchr(e.modes, prefix);
     if (add) {
-        mode = ModeRank(modeChar) < ModeRank(cur) ? modeChar : cur;
+        if (p) return;
+        n = strlen(e.modes);
+        if (n >= (short)sizeof(e.modes) - 1) return;
+        e.modes[n] = prefix;
+        e.modes[n + 1] = 0;
+        SortModes(e.modes);
     } else {
-        mode = (cur == modeChar) ? ' ' : cur;
+        if (!p) return;
+        memmove(p, p + 1, strlen(p));
     }
-    if (mode == cur) return;
-    {
-        char name[kMaxNick];
-        StrNCopy(name, (*w->nicks)[i].nick, sizeof(name));
-        RemoveAt(w, i);
-        InsertSorted(w, mode, name);
-    }
+    RemoveAt(w, i, NULL);
+    InsertSorted(w, &e);
+}
+
+void Win_NickSetAway(IRCWin *w, const char *nick, Boolean away)
+{
+    short i;
+    if (!w || !w->nicks) return;
+    i = FindNick(w, nick);
+    if (i < 0 || (*w->nicks)[i].away == away) return;
+    (*w->nicks)[i].away = away;
+    w->listDirty = true;
 }
 
 void Win_NickClear(IRCWin *w)
@@ -946,32 +1400,16 @@ void Win_NickClear(IRCWin *w)
 static void RebuildList(IRCWin *w)
 {
     GrafPtr save;
-    short i;
-    Cell cell;
-    char buf[kMaxNick + 2];
     Rect r;
+    short rows;
 
     if (!w->list) return;
     GetPort(&save);
     SetPort(w->win);
+    rows = (*w->list)->dataBounds.bottom;
     LSetDrawingMode(false, w->list);
-    LDelRow(0, 0, w->list);
-    if (w->nNicks > 0)
-        LAddRow(w->nNicks, 0, w->list);
-    for (i = 0; i < w->nNicks; i++) {
-        NickEntry *e = &(*w->nicks)[i];
-        short len;
-        if (e->mode != ' ') {
-            buf[0] = e->mode;
-            StrNCopy(buf + 1, e->nick, sizeof(buf) - 1);
-        } else {
-            StrNCopy(buf, e->nick, sizeof(buf));
-        }
-        len = strlen(buf);
-        cell.h = 0;
-        cell.v = i;
-        LSetCell(buf, len, cell, w->list);
-    }
+    if (rows > w->nNicks) LDelRow(rows - w->nNicks, w->nNicks, w->list);
+    else if (rows < w->nNicks) LAddRow(w->nNicks - rows, rows, w->list);
     LSetDrawingMode(true, w->list);
     r = (*w->list)->rView;
     r.right += 16;
@@ -1033,11 +1471,12 @@ void Win_RebuildMenu(void)
 
     if (!m) return;
     n = CountMItems(m);
-    for (i = n; i >= 1; i--)
+    for (i = n; i >= kFirstWindowItem; i--)
         DeleteMenuItem(m, i);
     for (w = gWinList, i = 1; w; w = w->next, i++) {
         char key[16];
         Str255 item;
+        short idx = kFirstWindowItem + i - 1;
         if (i <= 9) sprintf(key, "x/%d", i);
         else strcpy(key, "x");
         CToPStr(key, item);
@@ -1045,11 +1484,11 @@ void Win_RebuildMenu(void)
         if (w->kind == kWinServer) strcpy((char *)title + 1, "Server");
         else StrNCopy((char *)title + 1, w->name, 254);
         title[0] = strlen((char *)title + 1);
-        SetMenuItemText(m, i, title);
-        if (w->activity == 2) SetItemMark(m, i, 0x13);        /* diamond */
-        else if (w->activity == 1) SetItemMark(m, i, 0xA5);   /* bullet */
-        else if (w->win == front) SetItemMark(m, i, 0x12);    /* check */
-        else SetItemMark(m, i, 0);
+        SetMenuItemText(m, idx, title);
+        if (w->activity == 2) SetItemMark(m, idx, 0x13);        /* diamond */
+        else if (w->activity == 1) SetItemMark(m, idx, 0xA5);   /* bullet */
+        else if (w->win == front) SetItemMark(m, idx, 0x12);    /* check */
+        else SetItemMark(m, idx, 0);
     }
 }
 
@@ -1057,7 +1496,7 @@ void Win_SelectFromMenu(short item)
 {
     IRCWin *w;
     short i;
-    for (w = gWinList, i = 1; w; w = w->next, i++) {
+    for (w = gWinList, i = kFirstWindowItem; w; w = w->next, i++) {
         if (i == item) {
             SelectWindow(w->win);
             return;

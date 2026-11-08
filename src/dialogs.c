@@ -1,11 +1,13 @@
 /*
- * dialogs.c - Connect dialog, single-field prompt, About box, error alert.
+ * dialogs.c - Connect and Preferences dialogs, single-field prompt,
+ * paste confirmation, About box, error alert.
  */
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <Dialogs.h>
 #include <Events.h>
+#include <Fonts.h>
 #include <ToolUtils.h>
 #include <TextUtils.h>
 #include "MacIRC.h"
@@ -14,11 +16,21 @@
 enum {
     kConnOK = 1, kConnCancel = 2, kConnOutline = 3,
     kConnServer = 5, kConnPort = 7, kConnNick = 9,
-    kConnReal = 11, kConnChans = 13, kConnPass = 15
+    kConnReal = 11, kConnChans = 13, kConnPass = 15, kConnNickServ = 17
 };
 
 /* Prompt dialog items */
 enum { kPromptOK = 1, kPromptCancel = 2, kPromptOutline = 3, kPromptText = 5 };
+
+/* Preferences dialog items */
+enum {
+    kPrefOK = 1, kPrefCancel = 2, kPrefOutline = 3,
+    kPrefMonaco = 5, kPrefGeneva = 6, kPrefCourier = 7,
+    kPref9 = 9, kPref10 = 10, kPref12 = 11,
+    kPrefStamps = 12, kPrefBeep = 13, kPrefReconnect = 14, kPrefRejoin = 15,
+    kPrefLog = 16, kPrefNotify = 17,
+    kPrefHighlight = 19, kPrefQuit = 21, kPrefAway = 23
+};
 
 /* Draws the thick rounded border around the default button. */
 static pascal void OutlineDefault(DialogPtr d, short item)
@@ -48,7 +60,7 @@ static void CenterWindow(WindowPtr w)
     short width = r.right - r.left, height = r.bottom - r.top;
     short left = (scr.right - scr.left - width) / 2;
     short top = 20 + (scr.bottom - scr.top - 20 - height) / 3;
-    if (top < 40) top = 40;
+    if (top < 28) top = 28;
     MoveWindow(w, left, top, false);
 }
 
@@ -72,6 +84,24 @@ static void GetItemCText(DialogPtr d, short item, char *s, short max)
     GetDialogItem(d, item, &type, &h, &r);
     GetDialogItemText(h, p);
     PToCStr(p, s, max);
+}
+
+static void SetCtl(DialogPtr d, short item, short value)
+{
+    short type;
+    Handle h;
+    Rect r;
+    GetDialogItem(d, item, &type, &h, &r);
+    SetControlValue((ControlHandle)h, value);
+}
+
+static short GetCtl(DialogPtr d, short item)
+{
+    short type;
+    Handle h;
+    Rect r;
+    GetDialogItem(d, item, &type, &h, &r);
+    return GetControlValue((ControlHandle)h);
 }
 
 static void Trim(char *s)
@@ -108,6 +138,7 @@ Boolean DoConnectDialog(void)
     SetItemCText(d, kConnReal, gPrefs.realname);
     SetItemCText(d, kConnChans, gPrefs.channels);
     SetItemCText(d, kConnPass, gPrefs.password);
+    SetItemCText(d, kConnNickServ, gPrefs.nickservPass);
     SelectDialogItemText(d, kConnServer, 0, 32767);
     ShowWindow(d);
     SetPort(d);
@@ -148,6 +179,7 @@ Boolean DoConnectDialog(void)
             GetItemCText(d, kConnReal, gPrefs.realname, sizeof(gPrefs.realname));
             GetItemCText(d, kConnChans, gPrefs.channels, sizeof(gPrefs.channels));
             GetItemCText(d, kConnPass, gPrefs.password, sizeof(gPrefs.password));
+            GetItemCText(d, kConnNickServ, gPrefs.nickservPass, sizeof(gPrefs.nickservPass));
             Prefs_Save();
             ok = true;
             break;
@@ -187,13 +219,112 @@ Boolean DoPrompt(const char *prompt, char *buf, short max)
         if (item == kPromptOK) {
             GetItemCText(d, kPromptText, buf, max);
             Trim(buf);
-            ok = buf[0] != 0;
+            ok = true;
             break;
         }
     }
     DisposeDialog(d);
     SetPort(save);
     return ok;
+}
+
+static void SetFontRadios(DialogPtr d, short font)
+{
+    SetCtl(d, kPrefMonaco, font == kFontIDMonaco);
+    SetCtl(d, kPrefGeneva, font == kFontIDGeneva);
+    SetCtl(d, kPrefCourier, font == kFontIDCourier);
+}
+
+static void SetSizeRadios(DialogPtr d, short size)
+{
+    SetCtl(d, kPref9, size == 9);
+    SetCtl(d, kPref10, size == 10);
+    SetCtl(d, kPref12, size == 12);
+}
+
+Boolean DoPrefsDialog(void)
+{
+    DialogPtr d;
+    short item, font = gPrefs.fontID, size = gPrefs.fontSize;
+    Boolean ok = false;
+    GrafPtr save;
+
+    GetPort(&save);
+    d = GetNewDialog(kPrefsDLOG, NULL, (WindowPtr)-1L);
+    if (!d) {
+        SysBeep(1);
+        return false;
+    }
+    CenterWindow(d);
+    InstallOutline(d, kPrefOutline);
+    if (font != kFontIDMonaco && font != kFontIDGeneva && font != kFontIDCourier) font = kFontIDMonaco;
+    if (size != 9 && size != 10 && size != 12) size = 9;
+    SetFontRadios(d, font);
+    SetSizeRadios(d, size);
+    SetCtl(d, kPrefStamps, gPrefs.showTimestamps);
+    SetCtl(d, kPrefBeep, gPrefs.beepOnMention);
+    SetCtl(d, kPrefReconnect, gPrefs.autoReconnect);
+    SetCtl(d, kPrefRejoin, gPrefs.rejoinChannels);
+    SetCtl(d, kPrefLog, gPrefs.logging);
+    SetCtl(d, kPrefNotify, gPrefs.notifyBackground);
+    SetItemCText(d, kPrefHighlight, gPrefs.highlightWords);
+    SetItemCText(d, kPrefQuit, gPrefs.quitMsg);
+    SetItemCText(d, kPrefAway, gPrefs.awayMsg);
+    SelectDialogItemText(d, kPrefHighlight, 0, 32767);
+    ShowWindow(d);
+    SetPort(d);
+
+    for (;;) {
+        ModalDialog(NULL, &item);
+        switch (item) {
+        case kPrefMonaco:  font = kFontIDMonaco;  SetFontRadios(d, font); break;
+        case kPrefGeneva:  font = kFontIDGeneva;  SetFontRadios(d, font); break;
+        case kPrefCourier: font = kFontIDCourier; SetFontRadios(d, font); break;
+        case kPref9:  size = 9;  SetSizeRadios(d, size); break;
+        case kPref10: size = 10; SetSizeRadios(d, size); break;
+        case kPref12: size = 12; SetSizeRadios(d, size); break;
+        case kPrefStamps: case kPrefBeep: case kPrefReconnect:
+        case kPrefRejoin: case kPrefLog: case kPrefNotify:
+            SetCtl(d, item, !GetCtl(d, item));
+            break;
+        }
+        if (item == kPrefCancel) break;
+        if (item == kPrefOK) {
+            Boolean fontChanged = font != gPrefs.fontID || size != gPrefs.fontSize;
+            Boolean logChanged = (GetCtl(d, kPrefLog) != 0) != (gPrefs.logging != 0);
+            gPrefs.fontID = font;
+            gPrefs.fontSize = size;
+            gPrefs.showTimestamps = GetCtl(d, kPrefStamps);
+            gPrefs.beepOnMention = GetCtl(d, kPrefBeep);
+            gPrefs.autoReconnect = GetCtl(d, kPrefReconnect);
+            gPrefs.rejoinChannels = GetCtl(d, kPrefRejoin);
+            gPrefs.logging = GetCtl(d, kPrefLog);
+            gPrefs.notifyBackground = GetCtl(d, kPrefNotify);
+            GetItemCText(d, kPrefHighlight, gPrefs.highlightWords, sizeof(gPrefs.highlightWords));
+            GetItemCText(d, kPrefQuit, gPrefs.quitMsg, sizeof(gPrefs.quitMsg));
+            GetItemCText(d, kPrefAway, gPrefs.awayMsg, sizeof(gPrefs.awayMsg));
+            Prefs_Save();
+            DisposeDialog(d);
+            SetPort(save);
+            if (fontChanged) Win_ApplyFont();
+            if (logChanged) Log_ApplyPrefs();
+            return true;
+        }
+    }
+    DisposeDialog(d);
+    SetPort(save);
+    return ok;
+}
+
+Boolean ConfirmPaste(short lines, const char *target)
+{
+    Str255 n, t;
+    char num[8];
+    sprintf(num, "%d", lines);
+    CToPStr(num, n);
+    CToPStr(target, t);
+    ParamText(n, t, "\p", "\p");
+    return CautionAlert(kPasteALRT, NULL) == 1;
 }
 
 void DoAbout(void)

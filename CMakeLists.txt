@@ -15,7 +15,11 @@ add_application(MacIRC
     src/prefs.c
     src/dialogs.c
     src/util.c
+    src/log.c
+    src/url.c
+    src/chanlist.c
     src/MacIRC.r
+    src/Balloons.r
     TYPE "APPL"
     CREATOR "MIRC"
 )

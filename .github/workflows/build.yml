@@ -1,0 +1,33 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-68k:
+    runs-on: ubuntu-latest
+    container: ghcr.io/autc04/retro68:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_TOOLCHAIN_FILE=/Retro68-build/toolchain/m68k-apple-macos/cmake/retro68.toolchain.cmake
+
+      - name: Build
+        run: cmake --build build -- -k VERBOSE=1 2>&1 | tee build.log; test ${PIPESTATUS[0]} -eq 0
+        shell: bash
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacIRC-68k
+          path: |
+            build/MacIRC.bin
+            build/MacIRC.dsk
+            build/MacIRC.APPL
+            build/MacIRC.ad
+            build/%MacIRC.ad

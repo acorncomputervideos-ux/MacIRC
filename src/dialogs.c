@@ -113,13 +113,13 @@ static Boolean HasHelpMgr(void)
     return SafeGestalt('help', &r) == noErr && (r & 1);
 }
 
-static DialogPtr NewDialog(short id)
+static DialogPtr OpenHelpDialog(short id)
 {
     if (HasHelpMgr()) HMSetDialogResID(id);
     return GetNewDialog(id, NULL, (WindowPtr)-1L);
 }
 
-static void EndDialog(DialogPtr d)
+static void CloseHelpDialog(DialogPtr d)
 {
     DisposeDialog(d);
     if (HasHelpMgr()) HMSetDialogResID(-1);
@@ -144,7 +144,7 @@ Boolean DoConnectDialog(void)
     GrafPtr save;
 
     GetPort(&save);
-    d = NewDialog(kConnectDLOG);
+    d = OpenHelpDialog(kConnectDLOG);
     if (!d) {
         SysBeep(1);
         return false;
@@ -206,7 +206,7 @@ Boolean DoConnectDialog(void)
             break;
         }
     }
-    EndDialog(d);
+    CloseHelpDialog(d);
     SetPort(save);
     return ok;
 }
@@ -271,7 +271,7 @@ Boolean DoPrefsDialog(void)
     GrafPtr save;
 
     GetPort(&save);
-    d = NewDialog(kPrefsDLOG);
+    d = OpenHelpDialog(kPrefsDLOG);
     if (!d) {
         SysBeep(1);
         return false;
@@ -325,14 +325,14 @@ Boolean DoPrefsDialog(void)
             GetItemCText(d, kPrefQuit, gPrefs.quitMsg, sizeof(gPrefs.quitMsg));
             GetItemCText(d, kPrefAway, gPrefs.awayMsg, sizeof(gPrefs.awayMsg));
             Prefs_Save();
-            EndDialog(d);
+            CloseHelpDialog(d);
             SetPort(save);
             if (fontChanged) Win_ApplyFont();
             if (logChanged) Log_ApplyPrefs();
             return true;
         }
     }
-    EndDialog(d);
+    CloseHelpDialog(d);
     SetPort(save);
     return ok;
 }

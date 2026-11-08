@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <Memory.h>
+#include <LowMem.h>
 #include <Events.h>
 #include <Fonts.h>
 #include <OSUtils.h>
@@ -392,7 +393,7 @@ void Win_AddLine(IRCWin *w, short cls, const char *who, const char *text)
     Boolean atBottom;
     short ss, se;
     long len;
-    char stamp[16];
+    char stamp[32];
     unsigned long secs;
     DateTimeRec dt;
     const RGBColor *color = &kBlack;
@@ -670,7 +671,7 @@ static void CompleteNick(IRCWin *w)
 {
     TEHandle in = w->in;
     short start, end = (*in)->selStart;
-    char word[kMaxNick + 1], repl[kMaxNick + 4];
+    char word[kMaxNick + 1], repl[kMaxName + 4];
     const char *match = NULL;
     char *text;
     short i, n;
@@ -1017,7 +1018,7 @@ void Win_RebuildMenu(void)
     for (i = n; i >= 1; i--)
         DeleteMenuItem(m, i);
     for (w = gWinList, i = 1; w; w = w->next, i++) {
-        char key[8];
+        char key[16];
         Str255 item;
         if (i <= 9) sprintf(key, "x/%d", i);
         else strcpy(key, "x");
@@ -1046,6 +1047,29 @@ void Win_SelectFromMenu(short item)
     }
 }
 
+/* TEToScrap/TEFromScrap/TEGetScrapLength are link-time glue in Apple's
+   libraries rather than traps, so they're implemented here. */
+static void TEScrapToDesk(void)
+{
+    Handle h = LMGetTEScrpHandle();
+    if (!h) return;
+    HLock(h);
+    PutScrap(LMGetTEScrpLength(), 'TEXT', *h);
+    HUnlock(h);
+}
+
+static Boolean TEScrapFromDesk(void)
+{
+    Handle h = LMGetTEScrpHandle();
+    LONGINT offset, len;
+    if (!h) return false;
+    len = GetScrap(h, 'TEXT', &offset);
+    if (len < 0) return false;
+    if (len > 32767) len = 32767;
+    LMSetTEScrpLength((short)len);
+    return true;
+}
+
 void Win_Copy(IRCWin *w)
 {
     GrafPtr save;
@@ -1057,7 +1081,7 @@ void Win_Copy(IRCWin *w)
     } else {
         TECopy(w->in);
         ZeroScrap();
-        TEToScrap();
+        TEScrapToDesk();
     }
     SetPort(save);
 }
@@ -1070,7 +1094,7 @@ void Win_Cut(IRCWin *w)
     SetPort(w->win);
     TECut(w->in);
     ZeroScrap();
-    TEToScrap();
+    TEScrapToDesk();
     SetPort(save);
 }
 
@@ -1080,9 +1104,9 @@ void Win_Paste(IRCWin *w)
     GetPort(&save);
     SetPort(w->win);
     if (w->focusOut) SetFocus(w, false);
-    if (TEFromScrap() == noErr) {
+    if (TEScrapFromDesk()) {
         long cur = (*w->in)->teLength - ((*w->in)->selEnd - (*w->in)->selStart);
-        if (cur + TEGetScrapLength() > kInputMax * 2)
+        if (cur + LMGetTEScrpLength() > kInputMax * 2)
             SysBeep(1);
         else {
             TEPaste(w->in);

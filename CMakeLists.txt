@@ -20,5 +20,5 @@ add_application(MacIRC
     CREATOR "MIRC"
 )
 
-target_compile_options(MacIRC PRIVATE -Os -Wall -Wno-multichar -ffunction-sections)
+target_compile_options(MacIRC PRIVATE -Os -Wall -Wno-multichar -Wno-pointer-sign -ffunction-sections)
 set_target_properties(MacIRC PROPERTIES LINK_FLAGS "-Wl,-gc-sections")

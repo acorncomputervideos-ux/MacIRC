@@ -112,7 +112,37 @@ static short GetCtl(DialogPtr d, short item)
 static Boolean HasHelpMgr(void)
 {
     LONGINT r;
-    return SafeGestalt('help', &r) == noErr && (r & 1);
+    /* the Help Manager and the Communications Toolbox are both needed */
+    return SafeGestalt('help', &r) == noErr && (r & 1) &&
+           SafeGestalt('ctbu', &r) == noErr && r > 0;
+}
+
+/*
+ * AppendDITL is part of the Communications Toolbox utilities (built into
+ * System 7). Its glue isn't in Retro68's libraries, so call it the way
+ * Apple's CommToolboxUtilitiesGlue.a does: push the parameters, then the
+ * selector, point A0 at the selector and call _CommToolboxDispatch.
+ */
+static void CTBAppendDITL(DialogPtr d, Handle h, short method)
+{
+#ifdef __m68k__
+    __asm__ volatile (
+        "move.w #0x0401,-(%%sp)\n\t"   /* InitCTBUtilities */
+        "move.l %%sp,%%a0\n\t"
+        ".short 0xA08B\n\t"            /* _CommToolboxDispatch */
+        "addq.l #2,%%sp\n\t"
+        "move.l %0,-(%%sp)\n\t"
+        "move.l %1,-(%%sp)\n\t"
+        "move.w %2,-(%%sp)\n\t"
+        "move.w #0x0402,-(%%sp)\n\t"   /* AppendDITL */
+        "move.l %%sp,%%a0\n\t"
+        ".short 0xA08B\n\t"
+        "lea 12(%%sp),%%sp"
+        : : "r"(d), "r"(h), "r"(method)
+        : "d0", "d1", "d2", "a0", "a1", "memory", "cc");
+#else
+    (void)d; (void)h; (void)method;
+#endif
 }
 
 static void AddHelpItem(DialogPtr d, short hdlgID)
@@ -128,7 +158,7 @@ static void AddHelpItem(DialogPtr d, short hdlgID)
     p[17] = 1;
     p[18] = (unsigned char)(hdlgID >> 8);
     p[19] = (unsigned char)hdlgID;
-    AppendDITL(d, h, overlayDITL);
+    CTBAppendDITL(d, h, overlayDITL);
     DisposeHandle(h);
 }
 

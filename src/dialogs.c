@@ -162,10 +162,23 @@ static void AddHelpItem(DialogPtr d, short hdlgID)
     DisposeHandle(h);
 }
 
+static short DbgCountItems(DialogPtr d)
+{
+    Handle items = ((DialogPeek)d)->items;
+    return items ? (*(short *)*items) + 1 : -1;
+}
+
 static DialogPtr OpenHelpDialog(short id)
 {
     DialogPtr d = GetNewDialog(id, NULL, (WindowPtr)-1L);
+    LONGINT r1 = 0, r2 = 0;
+    char dbg[120];
+    short before = d ? DbgCountItems(d) : -1;
+    OSErr e1 = SafeGestalt('help', &r1), e2 = SafeGestalt('ctbu', &r2);
     if (d && HasHelpMgr()) AddHelpItem(d, id);
+    sprintf(dbg, "DEBUG help=%d/%ld ctbu=%d/%ld items %d -> %d", e1, (long)r1, e2, (long)r2,
+            before, d ? DbgCountItems(d) : -1);
+    Win_AddLine(Win_Server(), kLineInfo, NULL, dbg);
     return d;
 }
 

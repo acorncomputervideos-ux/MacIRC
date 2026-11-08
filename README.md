@@ -1,134 +1,218 @@
 # MacIRC
 
-An IRC client for classic 68k Macintosh computers, written in C against the
-original Macintosh Toolbox and the MacTCP networking API.
+**An IRC client for classic 68k Macintosh computers.**
 
-```
-┌─ #retrocomputing ─────────────────────────────────┬──────────────┐
-│ [21:04] *** You have joined #retrocomputing       │ @chanop      │
-│ [21:04] *** Topic for #retrocomputing: vintage... │ +helper      │
-│ [21:05] <alice> anyone running System 7.5.5?      │ alice        │
-│ [21:05] <MacUser> yes, on an SE/30!               │ bob          │
-│ [21:06] * bob waves                               │ MacUser      │
-├───────────────────────────────────────────────────┴──────────────┤
-│ type here_                                                       │
-└──────────────────────────────────────────────────────────────────┘
-```
+MacIRC brings modern IRC chat to the Mac Plus, SE, Mac II, Classic, LC,
+PowerBook and Quadra. It's written in C against the original Macintosh
+Toolbox and MacTCP, so it looks and behaves like a native System 6 or
+System 7 application. It runs in about 1 MB of memory.
 
-## Features
+[![Build](https://github.com/acorncomputervideos-ux/MacIRC/actions/workflows/build.yml/badge.svg)](https://github.com/acorncomputervideos-ux/MacIRC/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/acorncomputervideos-ux/MacIRC)](https://github.com/acorncomputervideos-ux/MacIRC/releases/latest)
 
-**Conversations**
-- One window per channel and per private conversation, plus a server window
-- A topic bar at the top of each channel; click it to change the topic
-- Channel nick lists with the server's own status prefixes (`~ & @ % +`),
-  tracking several at once (multi-prefix). Users who are away are shown in
-  gray. Double-click a nick to open a private conversation
-- Styled scrollback: bold nicknames, colours for joins/parts, notices,
-  actions and errors (on colour Macs). Lines that mention your nickname or
-  one of your highlight words are shown in red
-- Channel List window (IRC ▸ List Channels…): sort by name or size,
-  double-click to join
-- Ignore list with nicknames or `nick!user@host` masks (`*` and `?` work)
-- Set Away / I'm Back, with your saved away message
+![MacIRC on a Quadra 630 with System 7.5.5: a channel window with a topic bar, coloured conversation and a nick list](docs/screenshot-channel.png)
 
-**Staying connected**
-- Connects by host name (via the MacTCP resolver) or IP address
-- Reconnects automatically if the connection drops, waiting 10 seconds, then
-  20, 40… up to 5 minutes, and rejoins your channels
-- Rejoins the channels you were in when you last quit
-- Identifies you to NickServ after connecting
-- Measures lag every minute (shown in the server window's title) and
-  reconnects if the server stops answering
-- Paces outgoing lines so pasting a lot of text doesn't get you
-  disconnected for flooding; asks before sending more than two pasted lines
+*MacIRC 1.1 on a Quadra 630 (emulated) running System 7.5.5. The line in
+red mentions one of the user's highlight words; the gray nick in the list
+is away.*
 
-**Mac touches**
-- Preferences: font (Monaco, Geneva or Courier) and size (9, 10 or 12),
-  timestamps, a sound when mentioned, highlight words, quit and away
-  messages, logging, reconnect and rejoin options
-- Conversation logs as SimpleText files in a "MacIRC Logs" folder
-- Command-click a link to open it with Internet Config (or, without
-  Internet Config, to copy it to the Clipboard)
-- Drag text out of a conversation, or drop text into the input line
-  (System 7.5, or the Drag Manager extension)
-- Balloon Help for the menus
-- Windows menu with ⌘1–⌘9, Tile and Cascade commands. A bullet marks
-  windows with new messages, and a diamond marks windows where someone
-  mentioned you. The zoom box fills whatever screen you have
-- Notification Manager alert when you're mentioned while MacIRC is in the
-  background
-- Tab completion of nicknames, ↑/↓ input history, Page Up/Down, Home/End
-- UTF-8 ⇄ Mac OS Roman conversion; mIRC colour codes are removed
-- Replies to CTCP VERSION, PING, TIME and CLIENTINFO; supports `/me`
-- Asynchronous networking, so the interface never freezes; works in the
-  background under MultiFinder and System 7
+## Download
+
+Get the latest version from the
+**[Releases page](https://github.com/acorncomputervideos-ux/MacIRC/releases/latest)**:
+
+| File | Use it for |
+|---|---|
+| `MacIRC-1.1.dsk` | An 800K disk image. Open it in an emulator (Basilisk II, Mini vMac, SheepShaver, Snow) or write it to an 800K floppy. |
+| `MacIRC-1.1.bin` | MacBinary, for copying to a real Mac over a network, serial cable or shared disk. Decode it with StuffIt Expander. |
 
 ## Requirements
 
-- A 68k Mac with 128K ROM or later (Mac Plus, SE, II series, Classic, LC,
-  PowerBook, Quadra, etc.). It also runs on Power Macs in emulation
-- System 6.0.4 or later (System 7.x recommended)
-- MacTCP, or Open Transport (which includes MacTCP compatibility), with
-  TCP/IP set up and a name server configured
-- About 1 MB of free memory (640 KB minimum)
+- A 68k Mac with 128K ROM or later: Mac Plus, SE, SE/30, Mac II series,
+  Classic, LC, PowerBook, Centris, Quadra and others. It also runs on Power
+  Macs in emulation.
+- System 6.0.4 or later. System 7.x is recommended.
+- MacTCP, or Open Transport (which includes MacTCP compatibility).
+- A network connection: Ethernet, or PPP/SLIP through a modem.
+- About 1 MB of free memory (640 KB minimum).
+
+> **No encryption.** MacIRC connects over plain-text TCP; a 68k Mac can't
+> do modern TLS at a usable speed. Use a network that still accepts
+> plain-text connections on port 6667, or run a bouncer (such as ZNC) or a
+> TLS proxy on your local network and connect to that.
+
+## Getting started
+
+### 1. Set up TCP/IP
+
+If your Mac is already online, skip this step.
+
+1. Open the **MacTCP** control panel (or **TCP/IP** with Open Transport).
+2. Select your network connection (usually **Ethernet**).
+3. Click **More…**, then either choose **Dynamically**/**Server** if
+   your network gives out addresses, or choose **Manually** and enter
+   your gateway address.
+4. Under **Domain Name Server Information**, enter `.` as the domain and
+   your DNS server's address, and select **Default**.
+5. If you chose Manually, enter the Mac's IP address in the main window.
+6. Close the control panel and restart the Mac.
+
+If MacIRC says *"TCP/IP has no IP address yet"*, this step hasn't been done.
+
+### 2. Connect
+
+1. Open **MacIRC** and choose **File ▸ Connect…** (⌘K).
+2. Enter the server (for example `irc.libera.chat`), the port (usually
+   6667), your nickname, and optionally:
+   - **Channels** to join automatically, separated by spaces or commas
+   - a **Password** if the server needs one (most don't)
+   - your **NickServ** password, so MacIRC can identify you
+3. Click **Connect**.
+
+Once you're connected, type messages in the box at the bottom of a window
+and press Return. Type `/join #channel` to join more channels, or
+`/help` for the list of commands.
+
+## Features
+
+### Chatting
+
+- **One window per conversation**: each channel and private conversation
+  gets its own window, plus a server window for messages from the server.
+- **Topic bar** at the top of each channel. Click it to change the topic.
+- **Nick list** for each channel, with operators and voiced users first.
+  It uses the server's own status prefixes (`~ & @ % +`) and keeps track of
+  several at once. People who are away are shown in gray. Double-click a
+  nick to start a private conversation.
+- **Coloured conversations** on colour Macs: bold nicknames, gray
+  timestamps, green joins and parts, purple actions, blue for your own
+  messages.
+- **Highlights**: lines that mention your nickname, or one of the words you
+  list in Preferences, are shown in red and can play the alert sound.
+- **Channel List** (IRC ▸ List Channels…): browse the server's channels,
+  sort by name or size, and double-click one to join it.
+- **Ignore list**: hide messages from nicknames or `nick!user@host` masks
+  (`*` and `?` are wildcards).
+- **Away**: IRC ▸ Set Away… marks you away with your saved message; choose
+  **I'm Back** when you return.
+- **Characters**: accented letters and typographic punctuation are
+  converted between UTF-8 and the Mac's character set. Characters the Mac
+  can't show, such as emoji, appear as `?`. mIRC colour and formatting
+  codes are removed.
+
+![The Channel List window, sorted by number of users](docs/screenshot-channel-list.png)
+
+### Staying connected
+
+- **Host names or IP addresses**, looked up with MacTCP's resolver.
+- **Automatic reconnection** if the connection drops: MacIRC waits 10
+  seconds, then 20, 40 and so on up to 5 minutes, then rejoins your
+  channels. Choose File ▸ Disconnect to stop it.
+- **Your channels come back** the next time you open MacIRC.
+- **NickServ**: MacIRC identifies you after connecting.
+- **Lag display**: the server window's title shows the delay to the server.
+  If the server stops answering for 2 minutes, MacIRC reconnects.
+- **Flood protection**: pasted text is sent at a pace servers accept, so
+  you don't get disconnected. MacIRC asks before sending more than two
+  pasted lines.
+
+### Mac touches
+
+- **Preferences** (Edit ▸ Preferences…): font (Monaco, Geneva or
+  Courier), size (9, 10 or 12 point), timestamps, the alert sound,
+  highlight words, quit and away messages, logging and reconnection.
+- **Logs**: conversations can be saved as SimpleText files in a
+  **MacIRC Logs** folder next to the application.
+- **Links**: ⌘-click a web address to open it with Internet Config.
+  Without Internet Config, the address is copied to the Clipboard.
+- **Drag and drop** (System 7.5, or the Macintosh Drag and Drop
+  extension): drag text out of a conversation, or drop text into the box
+  you type in.
+- **Windows menu**: switch with ⌘1–⌘9, or use **Tile Windows** and
+  **Cascade Windows**. A bullet (•) marks windows with new messages and a
+  diamond (◆) marks windows where someone mentioned you.
+- **Zoom box** sizes the window to fit your screen, from a Classic's 9"
+  screen to a large monitor.
+- **Background alerts**: when someone mentions you while you're using
+  another application, MacIRC flags the Application menu.
+- **Balloon Help** for the menus.
+- MacIRC keeps working in the background under MultiFinder and System 7,
+  and the interface never freezes while it waits for the network.
+
+![The Preferences dialog](docs/screenshot-preferences.png)
+
+## Keyboard
+
+| Key | Action |
+|---|---|
+| Return or Enter | Send the message |
+| Tab | Complete the nickname you've started typing |
+| ↑ / ↓ | Recall earlier lines you typed |
+| Page Up / Page Down | Scroll the conversation |
+| Home / End | Jump to the top or bottom of the conversation |
+| ⌘1 – ⌘9 | Switch to a window |
+| ⌘K | Connect… |
+| ⌘J | Join a channel |
+| ⌘L | List channels |
+| ⌘W | Close the window (and leave the channel) |
 
 ## Commands
 
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/join #channel [key]` | Join a channel (opens a window) |
+| `/join #channel [key]` | Join a channel |
 | `/part [#channel] [reason]` | Leave a channel |
 | `/msg nick text` | Send a private message |
-| `/query nick [text]` | Open a private conversation window |
-| `/me action` | Send an action (`* nick waves`) |
+| `/query nick [text]` | Open a private conversation |
+| `/me action` | Describe an action (`* nick waves`) |
 | `/notice target text` | Send a notice |
 | `/nick newnick` | Change your nickname |
-| `/topic [#channel] [text]` | Show or set the topic |
-| `/names [#channel]` | List the users in a channel |
-| `/whois nick` | Look up a user |
-| `/away [message]` | Set your away status (`/away` alone toggles it) |
-| `/back` | Clear your away status |
+| `/topic [#channel] [text]` | Show or change the topic |
+| `/names [#channel]` | List the people in a channel |
+| `/whois nick` | Look someone up |
+| `/away [message]` | Mark yourself away (`/away` alone switches it on or off) |
+| `/back` | Mark yourself back |
 | `/list [min users]` | Open the Channel List |
 | `/ignore [mask]` | Ignore someone, or show the ignore list |
 | `/unignore mask` | Stop ignoring someone |
 | `/invite nick [#channel]` | Invite someone to a channel |
-| `/kick nick [reason]` | Kick someone (channel operators only) |
-| `/op` `/deop` `/voice` `/devoice nick` | Change channel status |
-| `/ctcp nick command` | Send a CTCP request |
-| `/quote line` or `/raw line` | Send a raw IRC line |
+| `/kick nick [reason]` | Remove someone from the channel (operators only) |
+| `/op`, `/deop`, `/voice`, `/devoice nick` | Change someone's channel status |
+| `/ctcp nick command` | Send a CTCP request, such as `VERSION` |
+| `/quote line` or `/raw line` | Send a raw IRC command |
 | `/server host [port]` | Connect to a server |
 | `/quit [message]` | Disconnect |
-| `/clear` | Clear the current window |
-| `/close` | Leave and close the current window |
-| `/help` | List the commands |
+| `/clear` | Clear the window |
+| `/close` | Leave the channel and close its window |
+| `/help` | Show the commands |
 
-Any other `/command` is sent to the server as-is (for example, `/list`,
-`/motd`, `/mode`). Start a line with `//` to send text that begins with a
-slash.
+Other commands, such as `/motd` or `/mode`, are sent to the server
+unchanged. To send a message that starts with a slash, begin it with `//`.
 
-## Using it
+## Troubleshooting
 
-1. Launch MacIRC and choose **File ▸ Connect…** (⌘K).
-2. Enter a server, port (usually 6667), nickname, and optionally a
-   comma- or space-separated list of channels to join automatically and
-   your NickServ password.
-3. Click **Connect**. When you're registered, MacIRC joins your channels.
+| Message | What to do |
+|---|---|
+| *TCP/IP has no IP address yet* | Set up the MacTCP or TCP/IP control panel and restart (see [Set up TCP/IP](#1-set-up-tcpip)). |
+| *MacTCP is not available* | Install MacTCP or Open Transport. |
+| *name server did not answer* / *host not found* | Check the name server address in MacTCP, or connect using the server's IP address. |
+| *connection refused* / *timed out* | Check the server name and port. The server may only accept TLS connections. |
+| *Nickname … is unavailable* | MacIRC tries adding `_`. Use `/nick` to pick another. |
 
-The connect dialog defaults to `irc.libera.chat` port 6667.
+## Privacy and security
 
-**TLS:** MacIRC connects over plain-text TCP only. A 68k Mac can't do
-modern TLS at a usable speed, so use a network that still allows plain-text
-connections. You can also run a bouncer (such as ZNC) or a TLS-terminating
-proxy on your local network. Don't reuse an important password: the server
-password and NickServ password are sent and stored in the preferences
-file without encryption.
+- The server password and NickServ password are stored, unencrypted, in
+  the **MacIRC Prefs** file (in the Preferences folder on System 7). Don't
+  reuse an important password.
+- Everything is sent without encryption, including passwords and private
+  messages.
 
-## Building
+## Building from source
 
 MacIRC is built with [Retro68](https://github.com/autc04/Retro68), a GCC
 cross-compiler for classic Mac OS.
 
-With the Retro68 Docker image:
+With Docker:
 
 ```sh
 docker run --rm -v "$PWD":/src -w /src ghcr.io/autc04/retro68 sh -c '
@@ -137,7 +221,7 @@ docker run --rm -v "$PWD":/src -w /src ghcr.io/autc04/retro68 sh -c '
   cmake --build build'
 ```
 
-Or with a local Retro68 build:
+With a local Retro68 toolchain:
 
 ```sh
 cmake -S . -B build \
@@ -145,35 +229,40 @@ cmake -S . -B build \
 cmake --build build
 ```
 
-The build writes these files to `build/`:
+The build writes `MacIRC.dsk` (disk image), `MacIRC.bin` (MacBinary), and
+`MacIRC.APPL`, `MacIRC.ad` and `%MacIRC.ad` (the application in raw,
+AppleDouble and netatalk forms) to `build/`.
 
-- `MacIRC.dsk`: an 800K HFS disk image containing the application. Use it
-  with emulators such as Mini vMac, Basilisk II or Snow, or write it to a
-  floppy
-- `MacIRC.bin`: a MacBinary file, to transfer to a real Mac and decode with
-  StuffIt Expander
-- `MacIRC.APPL`, `MacIRC.ad`, `%MacIRC.ad`: the application with its
-  resource fork in other formats (raw, AppleDouble, and netatalk)
+GitHub Actions builds every push. To publish a release, run the **Build**
+workflow from the Actions tab and enter a version number, or push a tag
+such as `v1.2`. Update `.github/release-notes.md` first, because it
+becomes the release description.
 
-Every push is built by GitHub Actions (`.github/workflows/build.yml`). The
-built application can be downloaded from the run's artifacts.
-
-## Source layout
+### Source layout
 
 | File | Purpose |
 |---|---|
 | `src/main.c` | Toolbox setup, event loop, menus, notifications |
-| `src/window.c` | Windows: styled TextEdit scrollback, input line, nick list |
-| `src/irc.c` | IRC protocol handling and `/commands` |
+| `src/window.c` | Conversation windows: topic bar, scrollback, input line, nick list, drag and drop |
+| `src/irc.c` | IRC protocol, `/commands`, reconnection, flood control |
 | `src/tcp.c` | Non-blocking TCP on the MacTCP `.IPP` driver |
-| `src/dnr.c` | Glue for the MacTCP Domain Name Resolver |
+| `src/dnr.c` | MacTCP name resolver glue |
 | `src/mactcp.h` | MacTCP parameter block definitions |
-| `src/charset.c` | UTF-8 ⇄ Mac OS Roman, formatting-code removal |
-| `src/dialogs.c` | Connect dialog, prompts, alerts |
-| `src/prefs.c` | Preferences file |
 | `src/chanlist.c` | Channel List window |
+| `src/dialogs.c` | Connect and Preferences dialogs, prompts, alerts |
+| `src/prefs.c` | Preferences file |
 | `src/log.c` | Conversation logs |
-| `src/url.c` | Finding and opening links (Internet Config) |
+| `src/url.c` | Finding links and opening them with Internet Config |
+| `src/charset.c` | UTF-8 ⇄ Mac OS Roman, formatting-code removal |
 | `src/util.c` | String helpers, wildcard matching, trap checks |
-| `src/MacIRC.r` | Resources: menus, dialogs, icon, `SIZE` |
+| `src/MacIRC.r` | Resources: menus, dialogs, alerts, icon, `SIZE` |
 | `src/Balloons.r` | Balloon Help, generated by `tools/make_balloons.py` |
+
+## Known issues
+
+- Balloon Help works for the menus but doesn't appear in the Connect and
+  Preferences dialogs.
+- Tested on an emulated Quadra 630 with System 7.5.5 and MacTCP 2.0.6.
+  Not yet tested on System 6, black-and-white Macs, Open Transport or real
+  hardware. Reports from real machines are welcome; please
+  [open an issue](https://github.com/acorncomputervideos-ux/MacIRC/issues).

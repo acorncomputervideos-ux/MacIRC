@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <Dialogs.h>
 #include <Memory.h>
+#include <Resources.h>
 #include <Events.h>
 #include <Fonts.h>
 #include <ToolUtils.h>
@@ -106,80 +107,52 @@ static short GetCtl(DialogPtr d, short item)
 }
 
 /* Balloon Help for a dialog comes from the 'hdlg' resource with the
-   dialog's ID. Retro68's Rez template writes DITL help items in a form
-   the Dialog Manager can't read, so the help item is added at run time
-   with AppendDITL (System 7 and later). */
+   dialog's ID, linked by a help item in the dialog's item list. Retro68's
+   Rez template writes help items in a form the Dialog Manager can't read,
+   so the item is appended to the loaded 'DITL' resource in memory instead
+   (once, before the first GetNewDialog). Only done when the Help Manager
+   exists: System 6 doesn't know this item type. */
 static Boolean HasHelpMgr(void)
 {
     LONGINT r;
-    /* the Help Manager and the Communications Toolbox are both needed */
-    return SafeGestalt('help', &r) == noErr && (r & 1) &&
-           SafeGestalt('ctbu', &r) == noErr && r > 0;
+    return SafeGestalt('help', &r) == noErr && (r & 1);
 }
 
-/*
- * AppendDITL is part of the Communications Toolbox utilities (built into
- * System 7). Its glue isn't in Retro68's libraries, so call it the way
- * Apple's CommToolboxUtilitiesGlue.a does: push the parameters, then the
- * selector, point A0 at the selector and call _CommToolboxDispatch.
- */
-static void CTBAppendDITL(DialogPtr d, Handle h, short method)
+static void AddHelpItem(short ditlID)
 {
-#ifdef __m68k__
-    __asm__ volatile (
-        "move.w #0x0401,-(%%sp)\n\t"   /* InitCTBUtilities */
-        "move.l %%sp,%%a0\n\t"
-        ".short 0xA08B\n\t"            /* _CommToolboxDispatch */
-        "addq.l #2,%%sp\n\t"
-        "move.l %0,-(%%sp)\n\t"
-        "move.l %1,-(%%sp)\n\t"
-        "move.w %2,-(%%sp)\n\t"
-        "move.w #0x0402,-(%%sp)\n\t"   /* AppendDITL */
-        "move.l %%sp,%%a0\n\t"
-        ".short 0xA08B\n\t"
-        "lea 12(%%sp),%%sp"
-        : : "r"(d), "r"(h), "r"(method)
-        : "d0", "d1", "d2", "a0", "a1", "memory", "cc");
-#else
-    (void)d; (void)h; (void)method;
-#endif
-}
-
-static void AddHelpItem(DialogPtr d, short hdlgID)
-{
-    Handle h = NewHandleClear(20);
+    static short patched[4];
+    short i;
+    Handle h;
+    long size;
     unsigned char *p;
-    if (!h) return;
-    p = (unsigned char *)*h;
-    /* count-1 = 0; one item: reserved long, empty rect, then
-       type (helpItem, disabled), data length 4, HMScanhdlg (1), resource ID */
-    p[14] = 0x81;
-    p[15] = 4;
-    p[17] = 1;
-    p[18] = (unsigned char)(hdlgID >> 8);
-    p[19] = (unsigned char)hdlgID;
-    CTBAppendDITL(d, h, overlayDITL);
-    DisposeHandle(h);
-}
 
-static short DbgCountItems(DialogPtr d)
-{
-    Handle items = ((DialogPeek)d)->items;
-    return items ? (*(short *)*items) + 1 : -1;
+    for (i = 0; i < 4; i++) {
+        if (patched[i] == ditlID) return;
+        if (patched[i] == 0) break;
+    }
+    if (i == 4) return;
+    h = GetResource('DITL', ditlID);
+    if (!h) return;
+    HNoPurge(h);                    /* keep our change while we run */
+    size = GetHandleSize(h);
+    SetHandleSize(h, size + 18);
+    if (MemError() != noErr) return;
+    p = (unsigned char *)*h;
+    (*(short *)p)++;                /* one more item */
+    p += size;
+    memset(p, 0, 18);               /* reserved long, empty rect */
+    p[12] = 0x81;                   /* helpItem, disabled */
+    p[13] = 4;                      /* data length */
+    p[15] = 1;                      /* HMScanhdlg */
+    p[16] = (unsigned char)(ditlID >> 8);
+    p[17] = (unsigned char)ditlID;
+    patched[i] = ditlID;
 }
 
 static DialogPtr OpenHelpDialog(short id)
 {
-    DialogPtr d = GetNewDialog(id, NULL, (WindowPtr)-1L);
-    LONGINT r1 = 0, r2 = 0;
-    char dbg[120];
-    short before = d ? DbgCountItems(d) : -1;
-    OSErr e1 = SafeGestalt('help', &r1), e2 = SafeGestalt('ctbu', &r2);
-    if (d && HasHelpMgr()) AddHelpItem(d, id);
-    sprintf(dbg, "DEBUG help=%d/%ld ctbu=%d/%ld items %d -> %d", e1, (long)r1, e2, (long)r2,
-            before, d ? DbgCountItems(d) : -1);
-    Win_AddLine(Win_Server(), kLineInfo, NULL, dbg);
-    return d;
+    if (HasHelpMgr()) AddHelpItem(id);
+    return GetNewDialog(id, NULL, (WindowPtr)-1L);
 }
 
 static void CloseHelpDialog(DialogPtr d)

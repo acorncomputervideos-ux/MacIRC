@@ -609,7 +609,7 @@ static void HandleNumeric(IRCMsg *m, short num)
         w = Win_Find(Param(m, 1));
         if (w && w->kind == kWinChannel) {
             if (w->namesPending)
-                Info(w, "%d users on %s", w->nNicks, Param(m, 1));
+                Info(w, "%d %s on %s", w->nNicks, w->nNicks == 1 ? "user" : "users", Param(m, 1));
             w->namesPending = false;
         }
         return;

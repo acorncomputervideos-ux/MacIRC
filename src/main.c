@@ -322,7 +322,10 @@ static void Welcome(IRCWin *s)
     Win_AddLine(s, kLineInfo, NULL, "MacIRC " kAppVersion " \xD1 an IRC client for classic Macintosh.");
     Win_AddLine(s, kLineInfo, NULL, "Choose Connect\xC9 from the File menu (Command-K) to get started. Type /help for commands.");
     err = Net_Init();
-    if (err != noErr) {
+    if (err == -23004 || err == -23001 || err == -23002) {
+        Win_AddLine(s, kLineError, NULL,
+                    "TCP/IP has no IP address yet. Set one up in the MacTCP (or TCP/IP) control panel, then restart.");
+    } else if (err != noErr) {
         char msg[128];
         sprintf(msg, "MacTCP is not available (%s). Install MacTCP or Open Transport to connect.",
                 Net_ErrString(err));

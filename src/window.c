@@ -30,13 +30,15 @@ static char  gHistory[kHistoryMax][kInputMax + 1];
 static short gHistCount = 0;
 static short gHistPos = 0;
 
+/* Colours from the standard 16-colour palette, so they look right at
+   every screen depth instead of being rounded to black. */
 static const RGBColor kBlack  = { 0x0000, 0x0000, 0x0000 };
-static const RGBColor kGray   = { 0x7000, 0x7000, 0x7000 };
-static const RGBColor kGreen  = { 0x0000, 0x7000, 0x0000 };
-static const RGBColor kBlue   = { 0x0000, 0x0000, 0xB000 };
-static const RGBColor kRed    = { 0xC000, 0x0000, 0x0000 };
-static const RGBColor kPurple = { 0x7000, 0x0000, 0x9000 };
-static const RGBColor kBrown  = { 0x8000, 0x4000, 0x0000 };
+static const RGBColor kGray   = { 0x8080, 0x8080, 0x8080 };
+static const RGBColor kGreen  = { 0x0000, 0x6464, 0x1111 };
+static const RGBColor kBlue   = { 0x0000, 0x0000, 0xD4D4 };
+static const RGBColor kRed    = { 0xDDDD, 0x0808, 0x0606 };
+static const RGBColor kPurple = { 0x4646, 0x0000, 0xA5A5 };
+static const RGBColor kBrown  = { 0x5656, 0x2C2C, 0x0505 };
 
 /* ------------------------------------------------------------------ */
 /* Lookup                                                              */

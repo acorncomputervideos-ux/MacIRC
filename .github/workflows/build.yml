@@ -1,0 +1,72 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Version to publish as a GitHub Release (e.g. 1.1); leave empty to just build"
+        required: false
+        default: ""
+
+jobs:
+  build-68k:
+    runs-on: ubuntu-latest
+    container: ghcr.io/autc04/retro68:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_TOOLCHAIN_FILE=/Retro68-build/toolchain/m68k-apple-macos/cmake/retro68.toolchain.cmake
+
+      - name: Build
+        run: cmake --build build -- -k VERBOSE=1 2>&1 | tee build.log; test ${PIPESTATUS[0]} -eq 0
+        shell: bash
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacIRC-68k
+          path: |
+            build/MacIRC.bin
+            build/MacIRC.dsk
+            build/MacIRC.APPL
+            build/MacIRC.ad
+            build/%MacIRC.ad
+
+  # Publishes a GitHub Release with the built app, either when a tag like
+  # v1.1 is pushed or when the workflow is run by hand with a version.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
+    needs: build-68k
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: MacIRC-68k
+          path: dist
+
+      - name: Work out the version
+        id: ver
+        run: |
+          if [ -n "${{ inputs.release }}" ]; then v="${{ inputs.release }}"; else v="${GITHUB_REF_NAME#v}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          mv dist/MacIRC.dsk "dist/MacIRC-$v.dsk"
+          mv dist/MacIRC.bin "dist/MacIRC-$v.bin"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: MacIRC ${{ steps.ver.outputs.version }}
+          body_path: .github/release-notes.md
+          files: |
+            dist/MacIRC-*.dsk
+            dist/MacIRC-*.bin

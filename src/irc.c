@@ -46,6 +46,8 @@ static unsigned long gLastRecv = 0;
 static unsigned long gLagSent = 0;
 static unsigned long gLastLagCheck = 0;
 static long          gLagTicks = -1;
+static unsigned long gLastWhoRefresh = 0;
+#define kWhoRefresh   (60L * 180)   /* refresh away status every 3 minutes */
 
 /* server features */
 static char    gChanModesA[24] = "beI", gChanModesB[24] = "k", gChanModesC[24] = "l";
@@ -879,7 +881,7 @@ static void HandleNumeric(IRCMsg *m, short num)
     case 1:
         gRegistered = true;
         gReconnectDelay = 10;
-        gLastRecv = gLastLagCheck = TickCount();
+        gLastRecv = gLastLagCheck = gLastWhoRefresh = TickCount();
         StrNCopy(gNick, Param(m, 0), sizeof(gNick));
         Info(Win_Server(), "%s", Param(m, 1));
         if (gPrefs.nickservPass[0]) {
@@ -1118,6 +1120,18 @@ static void Keepalive(void)
     if (gLagSent && now - gLagSent > kDeadTimeout && now - gLastRecv > kDeadTimeout) {
         HandleClosed(noErr, "No reply from the server for 2 minutes");
         return;
+    }
+    /* Without away-notify, nobody tells us when people go away or come
+       back, so ask again now and then. */
+    if (!gCapAwayNotify && now - gLastWhoRefresh > kWhoRefresh) {
+        IRCWin *w;
+        gLastWhoRefresh = now;
+        for (w = gWinList; w; w = w->next) {
+            if (w->kind == kWinChannel && w->joined && !w->whoPending && w->nNicks <= 500) {
+                w->whoPending = true;
+                SendRaw("WHO %s", w->name);
+            }
+        }
     }
     if (!gLagSent && now - gLastLagCheck > kLagInterval) {
         char line[40];

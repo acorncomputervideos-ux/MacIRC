@@ -101,8 +101,7 @@ resource 'DITL' (128) {
         {142, 12, 158, 104},  StaticText { disabled, "Password:" };
         {142, 110, 158, 284}, EditText { enabled, "" };
         {168, 12, 184, 104},  StaticText { disabled, "NickServ:" };
-        {168, 110, 184, 284}, EditText { enabled, "" };
-        {0, 0, 0, 0},         HelpItem { disabled, HMScanhdlg { 128 } }
+        {168, 110, 184, 284}, EditText { enabled, "" }
     }
 };
 
@@ -150,8 +149,7 @@ resource 'DITL' (133) {
         {217, 12, 233, 130},  StaticText { disabled, "Quit message:" };
         {216, 136, 232, 404}, EditText { enabled, "" };
         {243, 12, 259, 130},  StaticText { disabled, "Away message:" };
-        {242, 136, 258, 404}, EditText { enabled, "" };
-        {0, 0, 0, 0},         HelpItem { disabled, HMScanhdlg { 133 } }
+        {242, 136, 258, 404}, EditText { enabled, "" }
     }
 };
 
@@ -199,7 +197,7 @@ resource 'DITL' (131) {
 
 /* Confirm sending several pasted lines */
 resource 'ALRT' (132) {
-    {60, 60, 180, 400}, 132,
+    {60, 60, 200, 400}, 132,
     {
         OK, visible, sound1;
         OK, visible, sound1;
@@ -211,9 +209,9 @@ resource 'ALRT' (132) {
 
 resource 'DITL' (132) {
     {
-        {88, 254, 108, 324}, Button { enabled, "Send" };
-        {88, 170, 108, 240}, Button { enabled, "Cancel" };
-        {10, 64, 80, 330}, StaticText { disabled,
+        {108, 254, 128, 324}, Button { enabled, "Send" };
+        {108, 170, 128, 240}, Button { enabled, "Cancel" };
+        {10, 64, 100, 330}, StaticText { disabled,
             "Send ^0 lines to ^1?\0x0D\0x0D"
             "MacIRC sends them slowly so the server doesn't disconnect you for flooding." }
     }

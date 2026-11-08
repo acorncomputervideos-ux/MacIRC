@@ -104,6 +104,27 @@ static short GetCtl(DialogPtr d, short item)
     return GetControlValue((ControlHandle)h);
 }
 
+/* Balloon Help for a dialog comes from the 'hdlg' resource with the
+   dialog's ID. (Retro68's Rez template writes DITL help items in a form
+   the Dialog Manager can't read, so attach it this way instead.) */
+static Boolean HasHelpMgr(void)
+{
+    LONGINT r;
+    return SafeGestalt('help', &r) == noErr && (r & 1);
+}
+
+static DialogPtr NewDialog(short id)
+{
+    if (HasHelpMgr()) HMSetDialogResID(id);
+    return GetNewDialog(id, NULL, (WindowPtr)-1L);
+}
+
+static void EndDialog(DialogPtr d)
+{
+    DisposeDialog(d);
+    if (HasHelpMgr()) HMSetDialogResID(-1);
+}
+
 static void Trim(char *s)
 {
     char *p = s;
@@ -123,7 +144,7 @@ Boolean DoConnectDialog(void)
     GrafPtr save;
 
     GetPort(&save);
-    d = GetNewDialog(kConnectDLOG, NULL, (WindowPtr)-1L);
+    d = NewDialog(kConnectDLOG);
     if (!d) {
         SysBeep(1);
         return false;
@@ -185,7 +206,7 @@ Boolean DoConnectDialog(void)
             break;
         }
     }
-    DisposeDialog(d);
+    EndDialog(d);
     SetPort(save);
     return ok;
 }
@@ -250,7 +271,7 @@ Boolean DoPrefsDialog(void)
     GrafPtr save;
 
     GetPort(&save);
-    d = GetNewDialog(kPrefsDLOG, NULL, (WindowPtr)-1L);
+    d = NewDialog(kPrefsDLOG);
     if (!d) {
         SysBeep(1);
         return false;
@@ -304,14 +325,14 @@ Boolean DoPrefsDialog(void)
             GetItemCText(d, kPrefQuit, gPrefs.quitMsg, sizeof(gPrefs.quitMsg));
             GetItemCText(d, kPrefAway, gPrefs.awayMsg, sizeof(gPrefs.awayMsg));
             Prefs_Save();
-            DisposeDialog(d);
+            EndDialog(d);
             SetPort(save);
             if (fontChanged) Win_ApplyFont();
             if (logChanged) Log_ApplyPrefs();
             return true;
         }
     }
-    DisposeDialog(d);
+    EndDialog(d);
     SetPort(save);
     return ok;
 }

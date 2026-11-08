@@ -7,6 +7,10 @@ PowerBook and Quadra. It's written in C against the original Macintosh
 Toolbox and MacTCP, so it looks and behaves like a native System 6 or
 System 7 application. It runs in about 1 MB of memory.
 
+[![Build](https://github.com/acorncomputervideos-ux/MacIRC/actions/workflows/build.yml/badge.svg)](https://github.com/acorncomputervideos-ux/MacIRC/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/acorncomputervideos-ux/MacIRC)](https://github.com/acorncomputervideos-ux/MacIRC/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/acorncomputervideos-ux/MacIRC/total)](https://github.com/acorncomputervideos-ux/MacIRC/releases)
+
 ![MacIRC on a Quadra 630 with System 7.5.5: a channel window with a topic bar, coloured conversation and a nick list](docs/screenshot-channel.png)
 
 *MacIRC 1.1 on a Quadra 630 (emulated) running System 7.5.5. The line in

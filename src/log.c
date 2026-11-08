@@ -6,10 +6,13 @@
 #include <stdio.h>
 #include <Files.h>
 #include <OSUtils.h>
+#include <Events.h>
 #include "MacIRC.h"
 
-static long  gLogDirID = 0;
-static short gLogVRef = 0;
+static long    gLogDirID = 0;
+static short   gLogVRef = 0;
+static Boolean gUnflushed = false;
+static unsigned long gLastFlush = 0;
 
 static Boolean FindLogFolder(void)
 {
@@ -97,6 +100,26 @@ void Log_Write(IRCWin *w, const char *line)
     }
     count = 1;
     FSWrite(w->logRef, &count, "\r");
+    gUnflushed = true;
+}
+
+/* Write buffered log data to disk every 30 seconds, so a crash or power
+   cut loses at most that much. Called from the event loop. */
+void Log_Idle(void)
+{
+    IRCWin *w;
+    if (!gUnflushed || TickCount() - gLastFlush < 60L * 30) return;
+    gLastFlush = TickCount();
+    gUnflushed = false;
+    for (w = gWinList; w; w = w->next) {
+        if (w->logRef) {
+            ParamBlockRec pb;
+            memset(&pb, 0, sizeof(pb));
+            pb.ioParam.ioRefNum = w->logRef;
+            PBFlushFileSync(&pb);
+        }
+    }
+    FlushVol(NULL, gLogVRef);
 }
 
 void Log_Close(IRCWin *w)

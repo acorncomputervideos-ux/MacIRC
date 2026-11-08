@@ -457,6 +457,7 @@ int main(void)
 
         IRC_Poll();
         Win_IdleAll();
+        Log_Idle();
     }
 
     IRC_RememberChannels();

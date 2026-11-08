@@ -190,6 +190,7 @@ void    Log_Open(IRCWin *w);
 void    Log_Write(IRCWin *w, const char *line);
 void    Log_Close(IRCWin *w);
 void    Log_ApplyPrefs(void);
+void    Log_Idle(void);
 
 /* ---- URLs (url.c) ---- */
 Boolean URL_FindAt(const char *text, long len, long offset, long *start, long *end);

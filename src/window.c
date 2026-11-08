@@ -216,6 +216,16 @@ static void Relayout(IRCWin *w)
 /* ------------------------------------------------------------------ */
 /* Creation / disposal                                                 */
 
+static Boolean HasColorQD(void)
+{
+    static short known = -1;
+    if (known < 0) {
+        SysEnvRec env;
+        known = (SysEnvirons(1, &env) == noErr && env.hasColorQD) ? 1 : 0;
+    }
+    return known == 1;
+}
+
 static void InitMetrics(void)
 {
     FontInfo fi;
@@ -270,8 +280,14 @@ IRCWin *Win_Create(short kind, const char *name)
 
     DefaultBounds(w, &bounds);
     CToPStr(name, title);
-    w->win = NewWindow(NULL, &bounds, title, false, kZoomDocProc,
-                       (WindowPtr)-1L, kind != kWinServer, (long)w);
+    /* A colour port is needed for styled text colours: on an old-style
+       port, RGBForeColor snaps to the 8 basic QuickDraw colours. */
+    if (HasColorQD())
+        w->win = NewCWindow(NULL, &bounds, title, false, kZoomDocProc,
+                            (WindowPtr)-1L, kind != kWinServer, (long)w);
+    else
+        w->win = NewWindow(NULL, &bounds, title, false, kZoomDocProc,
+                           (WindowPtr)-1L, kind != kWinServer, (long)w);
     if (!w->win) {
         DisposePtr((Ptr)w);
         return NULL;

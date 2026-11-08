@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <Dialogs.h>
+#include <Memory.h>
 #include <Events.h>
 #include <Fonts.h>
 #include <ToolUtils.h>
@@ -105,24 +106,42 @@ static short GetCtl(DialogPtr d, short item)
 }
 
 /* Balloon Help for a dialog comes from the 'hdlg' resource with the
-   dialog's ID. (Retro68's Rez template writes DITL help items in a form
-   the Dialog Manager can't read, so attach it this way instead.) */
+   dialog's ID. Retro68's Rez template writes DITL help items in a form
+   the Dialog Manager can't read, so the help item is added at run time
+   with AppendDITL (System 7 and later). */
 static Boolean HasHelpMgr(void)
 {
     LONGINT r;
     return SafeGestalt('help', &r) == noErr && (r & 1);
 }
 
+static void AddHelpItem(DialogPtr d, short hdlgID)
+{
+    Handle h = NewHandleClear(20);
+    unsigned char *p;
+    if (!h) return;
+    p = (unsigned char *)*h;
+    /* count-1 = 0; one item: reserved long, empty rect, then
+       type (helpItem, disabled), data length 4, HMScanhdlg (1), resource ID */
+    p[14] = 0x81;
+    p[15] = 4;
+    p[17] = 1;
+    p[18] = (unsigned char)(hdlgID >> 8);
+    p[19] = (unsigned char)hdlgID;
+    AppendDITL(d, h, overlayDITL);
+    DisposeHandle(h);
+}
+
 static DialogPtr OpenHelpDialog(short id)
 {
-    if (HasHelpMgr()) HMSetDialogResID(id);
-    return GetNewDialog(id, NULL, (WindowPtr)-1L);
+    DialogPtr d = GetNewDialog(id, NULL, (WindowPtr)-1L);
+    if (d && HasHelpMgr()) AddHelpItem(d, id);
+    return d;
 }
 
 static void CloseHelpDialog(DialogPtr d)
 {
     DisposeDialog(d);
-    if (HasHelpMgr()) HMSetDialogResID(-1);
 }
 
 static void Trim(char *s)
